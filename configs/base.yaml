@@ -1,0 +1,65 @@
+# Base configuration for SSL ViT training on JWST galaxy thumbnails.
+# Override with method-specific configs (mae.yaml, dino.yaml, mae_dino.yaml).
+
+# ---- Data ----
+data:
+  catalog_dir: "../JWSP-JWST-to-SpArcFiRe/outputs/JWST-JWST_galaxy_thumbnails"
+  index_path: "output/file_index.json"
+  image_size: 64
+  min_dim: 10
+  max_dim: 200
+  normalization: "percentile"
+  percentile_clip: [1.0, 99.0]
+  batch_size: 256
+  num_workers: 8
+  pin_memory: true
+  prefetch_factor: 2
+
+# ---- Model ----
+model:
+  vit_size: "tiny"            # tiny | small | base
+  patch_size: 8               # 4, 8, or 16
+  in_channels: 1
+  drop_rate: 0.0
+  attn_drop_rate: 0.0
+  drop_path_rate: 0.1
+
+# ---- Training ----
+training:
+  epochs: 100
+  learning_rate: 1.5e-4
+  min_learning_rate: 1.0e-6
+  weight_decay: 0.05
+  warmup_epochs: 10
+  lr_schedule: "cosine"       # cosine | linear | step
+  mixed_precision: true       # fp16 on PyTorch, bf16 on JAX
+  gradient_clip_norm: 1.0
+  seed: 42
+
+# ---- SSL Method ----
+ssl:
+  method: "mae"               # mae | dino | mae_dino
+  framework: "timm"           # timm | hf | jax
+
+# ---- Distributed ----
+distributed:
+  enabled: false
+  backend: "nccl"
+  num_gpus: 1
+
+# ---- Logging ----
+logging:
+  log_level: "INFO"
+  log_dir: "output/logs"
+  wandb_enabled: false
+  wandb_project: "jwst-ssl-vit"
+  wandb_name: null
+  log_every_n_steps: 50
+  save_every_n_epochs: 5
+  visualize_every_n_epochs: 10
+
+# ---- Checkpointing ----
+checkpointing:
+  checkpoint_dir: "output/checkpoints"
+  max_checkpoints: 5
+  resume_from: null            # Path to checkpoint to resume from

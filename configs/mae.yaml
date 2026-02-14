@@ -1,0 +1,26 @@
+# MAE (Masked Autoencoder) specific configuration.
+# Inherits from base.yaml.
+
+ssl:
+  method: "mae"
+
+mae:
+  mask_ratio: 0.75
+  decoder_embed_dim: 128
+  decoder_depth: 4
+  decoder_num_heads: 4
+  norm_pix_loss: true
+
+# MAE-specific augmentation (no multi-crop)
+augmentation:
+  rotation: true
+  flip_h: true
+  flip_v: true
+  gaussian_noise_std: 0.02
+  brightness_range: [0.9, 1.1]
+  contrast_range: [0.9, 1.1]
+  random_erasing_prob: 0.0
+
+# MAE can use larger batch sizes (no multi-crop overhead)
+data:
+  batch_size: 512

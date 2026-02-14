@@ -1,0 +1,36 @@
+# DINO (Self-Distillation with No Labels) specific configuration.
+# Inherits from base.yaml.
+
+ssl:
+  method: "dino"
+
+dino:
+  out_dim: 65536
+  hidden_dim: 2048
+  bottleneck_dim: 256
+  momentum_teacher_start: 0.996
+  momentum_teacher_end: 1.0
+  teacher_temp: 0.04
+  teacher_temp_warmup: 0.04
+  teacher_temp_final: 0.07
+  teacher_temp_warmup_epochs: 30
+  student_temp: 0.1
+  center_momentum: 0.9
+
+# Multi-crop augmentation
+augmentation:
+  global_crop_size: 64
+  local_crop_size: 32
+  n_local_crops: 6
+  # Global crop augmentation
+  global_gaussian_noise_std: 0.03
+  global_brightness_range: [0.85, 1.15]
+  global_contrast_range: [0.85, 1.15]
+  # Local crop augmentation
+  local_gaussian_noise_std: 0.02
+  local_brightness_range: [0.9, 1.1]
+  local_contrast_range: [0.9, 1.1]
+
+# DINO needs smaller batch size due to multi-crop memory
+data:
+  batch_size: 64

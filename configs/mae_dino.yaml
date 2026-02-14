@@ -1,0 +1,54 @@
+# MAE → DINO combined training configuration.
+# Stage 1: MAE pretraining, Stage 2: DINO fine-tuning from MAE encoder.
+# Inherits from base.yaml.
+
+ssl:
+  method: "mae_dino"
+
+# Stage 1: MAE pretraining
+stage1:
+  epochs: 50
+  learning_rate: 1.5e-4
+  batch_size: 512
+  mae:
+    mask_ratio: 0.75
+    decoder_embed_dim: 128
+    decoder_depth: 4
+    decoder_num_heads: 4
+    norm_pix_loss: true
+  augmentation:
+    rotation: true
+    flip_h: true
+    flip_v: true
+    gaussian_noise_std: 0.02
+    brightness_range: [0.9, 1.1]
+    contrast_range: [0.9, 1.1]
+    random_erasing_prob: 0.0
+  checkpoint_path: null        # If set, skip stage 1 and load this MAE checkpoint
+
+# Stage 2: DINO fine-tuning
+stage2:
+  epochs: 50
+  learning_rate: 5.0e-5         # Lower LR for fine-tuning
+  batch_size: 64
+  dino:
+    out_dim: 65536
+    hidden_dim: 2048
+    bottleneck_dim: 256
+    momentum_teacher_start: 0.996
+    momentum_teacher_end: 1.0
+    teacher_temp: 0.04
+    teacher_temp_final: 0.07
+    teacher_temp_warmup_epochs: 15
+    student_temp: 0.1
+    center_momentum: 0.9
+  augmentation:
+    global_crop_size: 64
+    local_crop_size: 32
+    n_local_crops: 6
+    global_gaussian_noise_std: 0.03
+    global_brightness_range: [0.85, 1.15]
+    global_contrast_range: [0.85, 1.15]
+    local_gaussian_noise_std: 0.02
+    local_brightness_range: [0.9, 1.1]
+    local_contrast_range: [0.9, 1.1]
