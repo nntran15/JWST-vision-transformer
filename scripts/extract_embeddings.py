@@ -196,9 +196,7 @@ def extract_jax(
         all_embeddings.append(np.array(cls))
 
     embeddings = np.concatenate(all_embeddings, axis=0)
-
     all_paths = [fits_dataset.get_metadata(i)["path"] for i in range(len(fits_dataset))]
-
     _save_hdf5(output_path, embeddings, all_paths, vit_config, method, "jax")
 
     logger.info(f"Saved {embeddings.shape[0]} JAX embeddings to {output_path}")
@@ -237,7 +235,7 @@ def main():
     parser.add_argument("--max_samples", type=int, default=-1, help="-1 for all")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--catalog_dir", type=str,
-                        default="../JWSP-JWST-to-SpArcFiRe/outputs/JWST-JWST_galaxy_thumbnails")
+                        default="../JWSP-JWST-to-SpArcFiRe/outputs/JWST_galaxy_thumbnails")
     parser.add_argument("--index_path", type=str, default="output/file_index.json")
 
     args = parser.parse_args()

@@ -33,6 +33,8 @@ import yaml
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
+logger = logging.getLogger(__name__)
+
 
 def load_config(config_path: str, overrides: dict) -> dict:
     """Load YAML config and merge with base.yaml, then apply CLI overrides."""
@@ -98,6 +100,16 @@ def build_model_and_data(config: dict):
         min_dim=config["data"]["min_dim"],
         max_dim=config["data"]["max_dim"],
     )
+
+    # Subset the dataset if max_samples is set
+    max_samples = config["data"].get("max_samples")
+    if max_samples and len(index) > max_samples:
+        import random
+        rng = random.Random(config["training"]["seed"])
+        index = rng.sample(index, max_samples)
+        logger.info(f"Subsetted dataset to {len(index)} samples (max_samples={max_samples})")
+    else:
+        logger.info(f"Using full dataset: {len(index)} samples")
 
     # Build base dataset
     fits_dataset = FITSDataset(
@@ -229,7 +241,7 @@ def _build_pytorch(config, vit_config, fits_dataset, method, framework):
         stage1_cfg = config.get("stage1", {})
         mae_dataloader = create_dataloader(
             fits_dataset,
-            batch_size=stage1_cfg.get("batch_size", 512),
+            batch_size=stage1_cfg.get("batch_size", config["data"]["batch_size"]),
             num_workers=config["data"]["num_workers"],
             augmentation=mae_aug,
             seed=config["training"]["seed"],
@@ -246,7 +258,7 @@ def _build_pytorch(config, vit_config, fits_dataset, method, framework):
         dino_dataloader = create_dino_dataloader(
             fits_dataset,
             multi_crop_aug=dino_multi_crop,
-            batch_size=stage2_cfg.get("batch_size", 64),
+            batch_size=stage2_cfg.get("batch_size", config["data"]["batch_size"]),
             num_workers=config["data"]["num_workers"],
             seed=config["training"]["seed"],
         )
@@ -334,7 +346,7 @@ def _build_jax(config, vit_config, fits_dataset, method):
         mae_aug = AstronomyAugmentations()
         mae_iter = JAXDataIterator(
             fits_dataset,
-            batch_size=config.get("stage1", {}).get("batch_size", 512),
+            batch_size=config.get("stage1", {}).get("batch_size", config["data"]["batch_size"]),
             augmentation=mae_aug,
             seed=config["training"]["seed"],
         )
@@ -343,7 +355,7 @@ def _build_jax(config, vit_config, fits_dataset, method):
         dino_iter = JAXDINODataIterator(
             fits_dataset,
             multi_crop_aug=dino_multi_crop,
-            batch_size=config.get("stage2", {}).get("batch_size", 64),
+            batch_size=config.get("stage2", {}).get("batch_size", config["data"]["batch_size"]),
             seed=config["training"]["seed"],
         )
 
@@ -397,19 +409,52 @@ def main():
     parser.add_argument(
         "--seed", type=int, help="Override random seed",
     )
+    parser.add_argument(
+        "--output_dir", type=str,
+        help="Override output directory (sets log_dir and checkpoint_dir)",
+    )
+    parser.add_argument(
+        "--catalog_dir", type=str,
+        help="Override data catalog directory",
+    )
+    parser.add_argument(
+        "--index_path", type=str,
+        help="Override file index path",
+    )
+    parser.add_argument(
+        "--max_samples", type=int,
+        help="Override max dataset samples (subset size)",
+    )
 
     args = parser.parse_args()
 
     # Build overrides from CLI
     overrides = {}
+    if args.catalog_dir:
+        overrides["data.catalog_dir"] = args.catalog_dir
+    if args.index_path:
+        overrides["data.index_path"] = args.index_path
+    if args.max_samples:
+        overrides["data.max_samples"] = args.max_samples
+    if args.output_dir:
+        overrides["logging.log_dir"] = str(Path(args.output_dir) / "logs")
+        overrides["checkpointing.checkpoint_dir"] = str(
+            Path(args.output_dir) / "checkpoints"
+        )
     if args.framework:
         overrides["ssl.framework"] = args.framework
     if args.vit_size:
         overrides["model.vit_size"] = args.vit_size
     if args.batch_size:
         overrides["data.batch_size"] = args.batch_size
+        # Also propagate to mae_dino stage configs if they exist
+        overrides["stage1.batch_size"] = args.batch_size
+        overrides["stage2.batch_size"] = args.batch_size
     if args.epochs:
         overrides["training.epochs"] = args.epochs
+        # Also propagate to mae_dino stage configs if they exist
+        overrides["stage1.epochs"] = args.epochs
+        overrides["stage2.epochs"] = args.epochs
     if args.lr:
         overrides["training.learning_rate"] = args.lr
     if args.distributed:

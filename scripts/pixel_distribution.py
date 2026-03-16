@@ -9,26 +9,31 @@ This script processes a directory containing FITS files and generates:
 
 import argparse
 import sys
+import os
 from pathlib import Path
 from collections import defaultdict
 import numpy as np
 import matplotlib.pyplot as plt
 from astropy.io import fits
 from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 
 def get_fits_dimensions(fits_path):
     """
-    Extract the dimensions of a FITS file.
+    Extract the dimensions and instrument of a FITS file.
     
     Args:
         fits_path: Path to the FITS file
         
     Returns:
-        tuple: (x_dimension, y_dimension) or None if unable to read
+        tuple: (fits_path, x_dim, y_dim, instrument) where instrument
+               is the INSTRUME header value (e.g. 'NIRCAM', 'MIRI') or None
     """
     try:
         with fits.open(fits_path, memmap=True) as hdul:
+            # Read instrument from the first HDU header
+            instrument = hdul[0].header.get('INSTRUME', None)
             # Try to get data from the first HDU with data
             for hdu in hdul:
                 if hdu.data is not None:
@@ -36,11 +41,11 @@ def get_fits_dimensions(fits_path):
                     shape = hdu.data.shape
                     if len(shape) >= 2:
                         y_dim, x_dim = shape[-2], shape[-1]
-                        return (x_dim, y_dim)
-        return None
+                        return (str(fits_path), x_dim, y_dim, instrument)
+        return (str(fits_path), None, None, None)
     except Exception as e:
         # Silently skip files that can't be read
-        return None
+        return (str(fits_path), None, None, None)
 
 
 def assign_bin(dimension):
@@ -106,7 +111,6 @@ def create_heatmap(dimension_matrix, output_path):
     fig, ax = plt.subplots(figsize=(14, 12))
     
     # Create heatmap with logarithmic scale for better visualization
-    # Add 1 to avoid log(0)
     log_matrix = np.log10(dimension_matrix + 1)
     
     im = ax.imshow(log_matrix, cmap='YlOrRd', aspect='auto', interpolation='nearest')
@@ -145,14 +149,20 @@ def create_heatmap(dimension_matrix, output_path):
     print(f"Heatmap saved to: {output_path}")
 
 
-def process_fits_directory(directory_path, output_dir):
+def process_fits_directory(directory_path, output_dir, max_workers=None, instrument=None):
     """
     Process all FITS files in a directory and generate visualizations.
     
     Args:
         directory_path: Path to directory containing FITS files
         output_dir: Directory to save output plots
+        max_workers: Number of processes/workers to use (default: CPU count)
+        instrument: If specified, only count files from this JWST instrument
+                    (e.g. 'NIRCAM', 'MIRI', 'NIRISS', 'NIRSPEC', 'FGS')
     """
+    if instrument:
+        instrument = instrument.upper()
+        print(f"Filtering by instrument: {instrument}")
     directory = Path(directory_path)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -176,22 +186,40 @@ def process_fits_directory(directory_path, output_dir):
     
     # Process each FITS file
     failed_count = 0
-    for fits_path in tqdm(fits_files, desc="Processing FITS files"):
-        dimensions = get_fits_dimensions(fits_path)
+    skipped_count = 0
+    instrument_skipped = 0
+    
+    # We use chunks for processing progress reporting and memory efficiency
+    chunksize = max(1, len(fits_files) // (max_workers * 10 if max_workers else os.cpu_count() * 10))
+    
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # submit map jobs
+        futures = executor.map(get_fits_dimensions, fits_files, chunksize=chunksize)
         
-        if dimensions is not None:
-            x_dim, y_dim = dimensions
-            x_dims.append(x_dim)
-            y_dims.append(y_dim)
-            
-            # Assign to bins
-            x_bin = assign_bin(x_dim)
-            y_bin = assign_bin(y_dim)
-            dimension_matrix[x_bin, y_bin] += 1
-        else:
-            failed_count += 1
+        for fits_path, x_dim, y_dim, file_instrument in tqdm(futures, total=len(fits_files), desc="Processing FITS files"):
+            if x_dim is not None and y_dim is not None:
+                # Filter by instrument if specified
+                if instrument and (file_instrument is None or file_instrument.upper() != instrument):
+                    instrument_skipped += 1
+                    continue
+                if 20 <= x_dim <= 100 and 20 <= y_dim <= 100:
+                    x_dims.append(x_dim)
+                    y_dims.append(y_dim)
+                    
+                    # Assign to bins
+                    x_bin = assign_bin(x_dim)
+                    y_bin = assign_bin(y_dim)
+                    dimension_matrix[x_bin, y_bin] += 1
+                else:
+                    skipped_count += 1
+            else:
+                failed_count += 1
     
     print(f"\nProcessed {len(x_dims)} files successfully")
+    if instrument_skipped > 0:
+        print(f"Skipped {instrument_skipped} files (different instrument)")
+    if skipped_count > 0:
+        print(f"Skipped {skipped_count} files due to dimension cutoffs")
     if failed_count > 0:
         print(f"Failed to read {failed_count} files")
     
@@ -237,6 +265,20 @@ Examples:
         help='Output directory for plots (default: ./output)'
     )
     
+    parser.add_argument(
+        '--workers', '-w',
+        type=int,
+        default=os.cpu_count(),
+        help='Number of worker processes to use (default: CPU count)'
+    )
+    
+    parser.add_argument(
+        '--instrument', '-i',
+        type=str,
+        default=None,
+        help='Only count thumbnails from this JWST instrument (e.g. NIRCAM, MIRI, NIRISS, NIRSPEC, FGS). Case-insensitive.'
+    )
+    
     args = parser.parse_args()
     
     # Validate input directory
@@ -249,7 +291,7 @@ Examples:
         sys.exit(1)
     
     # Process the directory
-    process_fits_directory(args.directory, args.output)
+    process_fits_directory(args.directory, args.output, max_workers=args.workers, instrument=args.instrument)
 
 
 if __name__ == '__main__':
