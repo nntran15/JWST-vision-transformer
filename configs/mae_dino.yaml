@@ -7,7 +7,7 @@ ssl:
 
 # Stage 1: MAE pretraining
 stage1:
-  epochs: 50
+  epochs: 15
   learning_rate: 1.5e-4
   batch_size: 512
   mae:
@@ -28,7 +28,7 @@ stage1:
 
 # Stage 2: DINO fine-tuning
 stage2:
-  epochs: 50
+  epochs: 15
   learning_rate: 5.0e-5         # Lower LR for fine-tuning
   batch_size: 64
   dino:
@@ -39,13 +39,13 @@ stage2:
     momentum_teacher_end: 1.0
     teacher_temp: 0.04
     teacher_temp_final: 0.07
-    teacher_temp_warmup_epochs: 15
+    teacher_temp_warmup_epochs: 5
     student_temp: 0.1
     center_momentum: 0.9
   augmentation:
     global_crop_size: 64
     local_crop_size: 32
-    n_local_crops: 6
+    n_local_crops: 2
     global_gaussian_noise_std: 0.03
     global_brightness_range: [0.85, 1.15]
     global_contrast_range: [0.85, 1.15]

@@ -162,18 +162,28 @@ class DINO(nn.Module):
 
     def dino_loss(
         self,
-        student_outputs: List[torch.Tensor],
-        teacher_outputs: List[torch.Tensor],
+        student_raw_logits: List[torch.Tensor],
+        teacher_raw_logits: List[torch.Tensor],
     ) -> torch.Tensor:
+        """Compute DINO cross-entropy loss.
+
+        Applies centering and temperature internally, matching the JAX
+        implementation and the original DINO paper.
+        """
         total_loss = 0
         n_terms = 0
 
-        for t_idx, t_out in enumerate(teacher_outputs):
-            t_probs = F.softmax(t_out, dim=-1)
-            for s_idx, s_out in enumerate(student_outputs):
+        for t_idx, t_raw in enumerate(teacher_raw_logits):
+            # Center + sharpen teacher
+            t_centered = (t_raw - self.center) / self.teacher_temp
+            t_centered = t_centered.clamp(-100, 100)
+            t_probs = F.softmax(t_centered, dim=-1)
+
+            for s_idx, s_raw in enumerate(student_raw_logits):
                 if s_idx == t_idx:
                     continue
-                s_log_probs = F.log_softmax(s_out, dim=-1)
+                s_tempered = s_raw / self.student_temp
+                s_log_probs = F.log_softmax(s_tempered, dim=-1)
                 loss = -torch.sum(t_probs * s_log_probs, dim=-1).mean()
                 total_loss += loss
                 n_terms += 1
@@ -185,19 +195,38 @@ class DINO(nn.Module):
         global_crops: List[torch.Tensor],
         local_crops: List[torch.Tensor],
     ) -> dict:
-        teacher_outputs = [self.forward_teacher(gc) for gc in global_crops]
-        all_teacher = torch.cat(teacher_outputs, dim=0)
-        self.update_center(all_teacher)
+        """Full DINO forward pass with multi-crop.
 
+        Raw logits are used for center update (avoiding feedback loop).
+        Centering and temperature are applied only inside dino_loss().
+        """
+        # Teacher: get RAW logits (no centering/temperature)
+        teacher_raw_logits = []
+        with torch.no_grad():
+            for gc in global_crops:
+                features = self.teacher_backbone.get_cls_token(gc)
+                logits = self.teacher_head(features)
+                teacher_raw_logits.append(logits)
+
+        # Update center with RAW teacher logits (critical: avoids feedback loop)
+        all_teacher_raw = torch.cat(teacher_raw_logits, dim=0)
+        self.update_center(all_teacher_raw)
+
+        # Student: get RAW logits (no temperature)
         all_crops = global_crops + local_crops
-        student_outputs = [self.forward_student(crop) for crop in all_crops]
+        student_raw_logits = []
+        for crop in all_crops:
+            features = self.student_backbone.get_cls_token(crop)
+            logits = self.student_head(features)
+            student_raw_logits.append(logits)
 
-        loss = self.dino_loss(student_outputs, teacher_outputs)
+        # Compute loss (centering + temperature applied inside)
+        loss = self.dino_loss(student_raw_logits, teacher_raw_logits)
 
         return {
             "loss": loss,
-            "student_outputs": student_outputs,
-            "teacher_outputs": teacher_outputs,
+            "student_outputs": student_raw_logits,
+            "teacher_outputs": teacher_raw_logits,
         }
 
     def get_encoder(self) -> HFViTWrapper:

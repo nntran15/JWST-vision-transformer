@@ -37,10 +37,10 @@ class MAEDINOTrainer:
         stage1 = self.config.get("stage1", {})
         mae_config = {**self.config}
         mae_config["training"] = {**self.config["training"]}
-        mae_config["training"]["epochs"] = stage1.get("epochs", 50)
-        mae_config["training"]["learning_rate"] = stage1.get("learning_rate", 1.5e-4)
+        mae_config["training"]["epochs"] = stage1.get("epochs", self.config["training"]["epochs"])
+        mae_config["training"]["learning_rate"] = stage1.get("learning_rate", self.config["training"]["learning_rate"])
         mae_config["data"] = {**self.config["data"]}
-        mae_config["data"]["batch_size"] = stage1.get("batch_size", 512)
+        mae_config["data"]["batch_size"] = stage1.get("batch_size", self.config["data"]["batch_size"])
         mae_config["mae"] = stage1.get("mae", {})
         mae_config["ssl"] = {**self.config["ssl"], "method": "mae"}
         return mae_config
@@ -50,10 +50,10 @@ class MAEDINOTrainer:
         stage2 = self.config.get("stage2", {})
         dino_config = {**self.config}
         dino_config["training"] = {**self.config["training"]}
-        dino_config["training"]["epochs"] = stage2.get("epochs", 50)
-        dino_config["training"]["learning_rate"] = stage2.get("learning_rate", 5e-5)
+        dino_config["training"]["epochs"] = stage2.get("epochs", self.config["training"]["epochs"])
+        dino_config["training"]["learning_rate"] = stage2.get("learning_rate", self.config["training"]["learning_rate"])
         dino_config["data"] = {**self.config["data"]}
-        dino_config["data"]["batch_size"] = stage2.get("batch_size", 64)
+        dino_config["data"]["batch_size"] = stage2.get("batch_size", self.config["data"]["batch_size"])
         dino_config["dino"] = stage2.get("dino", {})
         dino_config["ssl"] = {**self.config["ssl"], "method": "dino"}
         return dino_config

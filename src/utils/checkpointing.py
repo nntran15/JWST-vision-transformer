@@ -39,7 +39,7 @@ class CheckpointManager:
         metric_name: str = "loss",
         metric_mode: str = "min",
     ):
-        self.checkpoint_dir = Path(checkpoint_dir)
+        self.checkpoint_dir = Path(checkpoint_dir).resolve()
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.max_checkpoints = max_checkpoints
         self.metric_name = metric_name

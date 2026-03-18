@@ -1,4 +1,7 @@
 documentation/
 output/
 venv/
-
+.pytest_cache/
+scripts/__pycache__/
+START.md
+data/

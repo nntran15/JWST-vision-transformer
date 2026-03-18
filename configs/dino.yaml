@@ -13,7 +13,7 @@ dino:
   teacher_temp: 0.04
   teacher_temp_warmup: 0.04
   teacher_temp_final: 0.07
-  teacher_temp_warmup_epochs: 30
+  teacher_temp_warmup_epochs: 10
   student_temp: 0.1
   center_momentum: 0.9
 
@@ -21,7 +21,7 @@ dino:
 augmentation:
   global_crop_size: 64
   local_crop_size: 32
-  n_local_crops: 6
+  n_local_crops: 2
   # Global crop augmentation
   global_gaussian_noise_std: 0.03
   global_brightness_range: [0.85, 1.15]

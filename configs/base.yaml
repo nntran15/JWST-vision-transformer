@@ -3,15 +3,16 @@
 
 # ---- Data ----
 data:
-  catalog_dir: "../JWSP-JWST-to-SpArcFiRe/outputs/JWST-JWST_galaxy_thumbnails"
+  catalog_dir: "../JWSP-JWST-to-SpArcFiRe/outputs/JWST_galaxy_thumbnails"
   index_path: "output/file_index.json"
   image_size: 64
   min_dim: 10
   max_dim: 200
   normalization: "percentile"
   percentile_clip: [1.0, 99.0]
+  max_samples: 100000            # Subset size (null = use all). Random, seeded.
   batch_size: 256
-  num_workers: 8
+  num_workers: 2
   pin_memory: true
   prefetch_factor: 2
 
@@ -26,11 +27,11 @@ model:
 
 # ---- Training ----
 training:
-  epochs: 100
+  epochs: 30
   learning_rate: 1.5e-4
   min_learning_rate: 1.0e-6
   weight_decay: 0.05
-  warmup_epochs: 10
+  warmup_epochs: 5
   lr_schedule: "cosine"       # cosine | linear | step
   mixed_precision: true       # fp16 on PyTorch, bf16 on JAX
   gradient_clip_norm: 1.0

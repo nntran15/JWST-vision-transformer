@@ -243,18 +243,18 @@ class DINO(nn.Module):
 
     def dino_loss(
         self,
-        student_outputs: List[torch.Tensor],
-        teacher_outputs: List[torch.Tensor],
+        student_raw_logits: List[torch.Tensor],
+        teacher_raw_logits: List[torch.Tensor],
     ) -> torch.Tensor:
         """
         Compute DINO cross-entropy loss.
 
-        For each teacher (global) output, compute cross-entropy against
-        each student output (excluding same view).
+        Applies centering and temperature scaling internally, matching
+        the JAX implementation and the original DINO paper.
 
         Args:
-            student_outputs: List of student logits for all crops.
-            teacher_outputs: List of teacher logits for global crops only.
+            student_raw_logits: List of RAW student logits for all crops.
+            teacher_raw_logits: List of RAW teacher logits for global crops only.
 
         Returns:
             Scalar loss.
@@ -262,15 +262,20 @@ class DINO(nn.Module):
         total_loss = 0
         n_terms = 0
 
-        for t_idx, t_out in enumerate(teacher_outputs):
-            t_probs = F.softmax(t_out, dim=-1)
+        for t_idx, t_raw in enumerate(teacher_raw_logits):
+            # Center + sharpen teacher (apply centering and temperature here)
+            t_centered = (t_raw - self.center) / self.teacher_temp
+            # Clamp pre-softmax logits to prevent float32 overflow
+            t_centered = t_centered.clamp(-100, 100)
+            t_probs = F.softmax(t_centered, dim=-1)
 
-            for s_idx, s_out in enumerate(student_outputs):
+            for s_idx, s_raw in enumerate(student_raw_logits):
                 # Skip same view (first 2 are global, matching teacher indices)
                 if s_idx == t_idx:
                     continue
 
-                s_log_probs = F.log_softmax(s_out, dim=-1)
+                s_tempered = s_raw / self.student_temp
+                s_log_probs = F.log_softmax(s_tempered, dim=-1)
                 loss = -torch.sum(t_probs * s_log_probs, dim=-1).mean()
                 total_loss += loss
                 n_terms += 1
@@ -285,6 +290,9 @@ class DINO(nn.Module):
         """
         Full DINO forward pass with multi-crop.
 
+        Raw logits are used for center update (avoiding feedback loop).
+        Centering and temperature are applied only inside dino_loss().
+
         Args:
             global_crops: List of 2 tensors, each (B, 1, gs, gs).
             local_crops: List of N tensors, each (B, 1, ls, ls).
@@ -292,24 +300,33 @@ class DINO(nn.Module):
         Returns:
             Dict with 'loss', 'student_outputs', 'teacher_outputs'.
         """
-        # Teacher: only global crops (no gradient)
-        teacher_outputs = [self.forward_teacher(gc) for gc in global_crops]
+        # Teacher: get RAW logits (no centering/temperature)
+        teacher_raw_logits = []
+        with torch.no_grad():
+            for gc in global_crops:
+                features = self.teacher_backbone.get_cls_token(gc)
+                logits = self.teacher_head(features)
+                teacher_raw_logits.append(logits)
 
-        # Update center with teacher outputs
-        all_teacher = torch.cat(teacher_outputs, dim=0)
-        self.update_center(all_teacher)
+        # Update center with RAW teacher logits (critical: avoids feedback loop)
+        all_teacher_raw = torch.cat(teacher_raw_logits, dim=0)
+        self.update_center(all_teacher_raw)
 
-        # Student: all crops (global + local)
+        # Student: get RAW logits (no temperature)
         all_crops = global_crops + local_crops
-        student_outputs = [self.forward_student(crop) for crop in all_crops]
+        student_raw_logits = []
+        for crop in all_crops:
+            features = self.student_backbone.get_cls_token(crop)
+            logits = self.student_head(features)
+            student_raw_logits.append(logits)
 
-        # Compute loss
-        loss = self.dino_loss(student_outputs, teacher_outputs)
+        # Compute loss (centering + temperature applied inside)
+        loss = self.dino_loss(student_raw_logits, teacher_raw_logits)
 
         return {
             "loss": loss,
-            "student_outputs": student_outputs,
-            "teacher_outputs": teacher_outputs,
+            "student_outputs": student_raw_logits,
+            "teacher_outputs": teacher_raw_logits,
         }
 
     def get_encoder(self) -> TimmViTWrapper:

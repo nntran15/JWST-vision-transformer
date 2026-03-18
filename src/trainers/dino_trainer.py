@@ -49,8 +49,13 @@ class DINOTrainer:
         self.teacher_temp_final = dino_cfg.get("teacher_temp_final", 0.07)
         self.teacher_temp_warmup_epochs = dino_cfg.get("teacher_temp_warmup_epochs", 30)
 
-    def get_lr(self, epoch: int) -> float:
-        """Cosine schedule with linear warmup."""
+    def get_lr(self, epoch: float) -> float:
+        """Cosine schedule with linear warmup.
+
+        Args:
+            epoch: Fractional epoch (e.g., 0.5 = halfway through epoch 0).
+                   Using fractional epochs ensures LR > 0 from the very first step.
+        """
         if epoch < self.warmup_epochs:
             return self.lr * epoch / max(self.warmup_epochs, 1)
         progress = (epoch - self.warmup_epochs) / max(
@@ -134,16 +139,13 @@ class DINOTrainer:
         global_step = 0
 
         for epoch in range(start_epoch, self.epochs):
-            lr = self.get_lr(epoch)
             momentum = self.get_momentum(epoch)
             teacher_temp = self.get_teacher_temp(epoch)
             model.teacher_temp = teacher_temp
 
-            for pg in optimizer.param_groups:
-                pg["lr"] = lr
-
             epoch_loss = 0.0
             n_batches = 0
+            n_total_batches = len(dataloader) if hasattr(dataloader, '__len__') else None
 
             pbar = tqdm(
                 dataloader,
@@ -152,6 +154,11 @@ class DINOTrainer:
             )
 
             for batch_idx, (global_crops, local_crops) in enumerate(pbar):
+                # Fractional epoch for sub-epoch LR warmup (avoids lr=0 at epoch 0)
+                frac_epoch = epoch + (batch_idx / n_total_batches if n_total_batches else 0)
+                lr = self.get_lr(frac_epoch)
+                for pg in optimizer.param_groups:
+                    pg["lr"] = lr
                 # Move to device
                 global_crops = [gc.to(device, non_blocking=True) for gc in global_crops]
                 local_crops = [lc.to(device, non_blocking=True) for lc in local_crops]
@@ -162,6 +169,16 @@ class DINOTrainer:
                     with torch.cuda.amp.autocast():
                         outputs = model(global_crops, local_crops)
                         loss = outputs["loss"]
+
+                    # Check for NaN BEFORE applying gradients to prevent weight corruption
+                    if torch.isnan(loss) or torch.isinf(loss):
+                        logger.warning(
+                            f"NaN/Inf loss at step {global_step}, epoch {epoch + 1}. "
+                            f"Skipping optimizer + teacher update."
+                        )
+                        n_batches += 1
+                        global_step += 1
+                        continue
 
                     scaler.scale(loss).backward()
 
@@ -176,6 +193,17 @@ class DINOTrainer:
                 else:
                     outputs = model(global_crops, local_crops)
                     loss = outputs["loss"]
+
+                    # Check for NaN BEFORE applying gradients to prevent weight corruption
+                    if torch.isnan(loss) or torch.isinf(loss):
+                        logger.warning(
+                            f"NaN/Inf loss at step {global_step}, epoch {epoch + 1}. "
+                            f"Skipping optimizer + teacher update."
+                        )
+                        n_batches += 1
+                        global_step += 1
+                        continue
+
                     loss.backward()
 
                     if self.gradient_clip > 0:
@@ -278,6 +306,9 @@ class DINOTrainer:
         # Optimizer
         total_steps = self.epochs * len(data_iterator)
         warmup_steps = self.warmup_epochs * len(data_iterator)
+        # Cap warmup to avoid negative decay_steps when epochs < warmup_epochs
+        warmup_steps = min(warmup_steps, max(total_steps - 1, 0))
+        total_steps = max(total_steps, warmup_steps + 1)
 
         schedule = optax.warmup_cosine_decay_schedule(
             init_value=0.0,

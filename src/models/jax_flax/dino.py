@@ -158,6 +158,8 @@ def compute_dino_loss(
         if center is not None:
             t_out = t_out - center
         t_probs = jax.nn.softmax(t_out / teacher_temp, axis=-1)
+        # Clamp teacher probs to avoid NaN from extreme logits
+        t_probs = jnp.clip(t_probs, a_min=1e-7)
 
         for s_idx, s_out in enumerate(student_outputs):
             if s_idx == t_idx:

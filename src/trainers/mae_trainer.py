@@ -44,8 +44,13 @@ class MAETrainer:
         self.save_every = config["logging"]["save_every_n_epochs"]
         self.viz_every = config["logging"]["visualize_every_n_epochs"]
 
-    def get_lr(self, epoch: int) -> float:
-        """Compute learning rate with warmup + cosine decay."""
+    def get_lr(self, epoch: float) -> float:
+        """Compute learning rate with warmup + cosine decay.
+
+        Args:
+            epoch: Fractional epoch (e.g., 0.5 = halfway through epoch 0).
+                   Using fractional epochs ensures LR > 0 from the very first step.
+        """
         if epoch < self.warmup_epochs:
             return self.lr * epoch / max(self.warmup_epochs, 1)
         # Cosine decay
@@ -109,13 +114,9 @@ class MAETrainer:
         global_step = 0
 
         for epoch in range(start_epoch, self.epochs):
-            # Update learning rate
-            lr = self.get_lr(epoch)
-            for pg in optimizer.param_groups:
-                pg["lr"] = lr
-
             epoch_loss = 0.0
             n_batches = 0
+            n_total_batches = len(dataloader) if hasattr(dataloader, '__len__') else None
 
             pbar = tqdm(
                 dataloader,
@@ -124,6 +125,11 @@ class MAETrainer:
             )
 
             for batch_idx, images in enumerate(pbar):
+                # Fractional epoch for sub-epoch LR warmup (avoids lr=0 at epoch 0)
+                frac_epoch = epoch + (batch_idx / n_total_batches if n_total_batches else 0)
+                lr = self.get_lr(frac_epoch)
+                for pg in optimizer.param_groups:
+                    pg["lr"] = lr
                 images = images.to(device, non_blocking=True)
 
                 optimizer.zero_grad(set_to_none=True)
@@ -183,7 +189,7 @@ class MAETrainer:
                 )
 
             # Visualization
-            if self.viz_every > 0 and (epoch + 1) % self.viz_every == 0:
+            if self.viz_every > 0 and (epoch + 1) % self.viz_every == 0 and n_batches > 0:
                 self._visualize_reconstruction_pytorch(
                     model, images, outputs, wandb_logger, global_step
                 )
@@ -278,6 +284,9 @@ class MAETrainer:
         # Optimizer: AdamW with cosine schedule
         total_steps = self.epochs * len(data_iterator)
         warmup_steps = self.warmup_epochs * len(data_iterator)
+        # Cap warmup to avoid negative decay_steps when epochs < warmup_epochs
+        warmup_steps = min(warmup_steps, max(total_steps - 1, 0))
+        total_steps = max(total_steps, warmup_steps + 1)
 
         schedule = optax.warmup_cosine_decay_schedule(
             init_value=0.0,
