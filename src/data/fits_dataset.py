@@ -21,6 +21,8 @@ import numpy as np
 from astropy.io import fits
 from tqdm import tqdm
 
+from .fits_preprocessing import normalize_fits_data, resize_chw
+
 logger = logging.getLogger(__name__)
 
 
@@ -119,7 +121,8 @@ class FITSDataset:
     Args:
         index: List of dicts with 'path', 'x_dim', 'y_dim' keys (from build_file_index).
         target_size: Resize all images to (target_size, target_size).
-        normalization: Normalization strategy ('minmax', 'percentile', 'zscore').
+        normalization: Normalization strategy ('header', 'arcsinh_rms',
+            'minmax', 'percentile', 'zscore').
         percentile_clip: Percentile range for 'percentile' normalization (low, high).
     """
 
@@ -127,85 +130,62 @@ class FITSDataset:
         self,
         index: List[Dict[str, Any]],
         target_size: int = 64,
-        normalization: str = "percentile",
+        normalization: str = "header",
         percentile_clip: Tuple[float, float] = (1.0, 99.0),
     ):
         self.index = index
         self.target_size = target_size
         self.normalization = normalization
         self.percentile_clip = percentile_clip
+        self.default_channels = 1
 
     def __len__(self) -> int:
         return len(self.index)
 
-    def load_fits(self, path: str) -> Optional[np.ndarray]:
+    def load_fits(self, path: str) -> Tuple[Optional[np.ndarray], Optional[fits.Header]]:
         """
-        Load a single FITS file and return the 2D image data.
+        Load a single FITS file and return image data plus header.
 
         Args:
             path: Path to the FITS file.
 
         Returns:
-            2D NumPy array (float32) or None if loading fails.
+            Tuple of (image array, FITS header) or (None, None) if loading fails.
         """
         try:
             with fits.open(path, memmap=True) as hdul:
                 for hdu in hdul:
                     if hdu.data is not None and len(hdu.data.shape) >= 2:
-                        data = hdu.data.astype(np.float32)
-                        # Take last two dimensions if >2D (e.g., data cubes)
-                        if data.ndim > 2:
-                            data = data[0]
-                        return data
-            return None
+                        return hdu.data.astype(np.float32), hdu.header
+            return None, None
         except Exception as e:
             logger.debug(f"Failed to load {path}: {e}")
-            return None
+            return None, None
 
-    def normalize(self, image: np.ndarray) -> np.ndarray:
+    def normalize(
+        self,
+        image: np.ndarray,
+        header: Optional[fits.Header] = None,
+    ) -> np.ndarray:
         """
         Normalize pixel values based on the configured strategy.
 
         Handles NaN/Inf values and cosmic ray artifacts common in astronomical data.
 
         Args:
-            image: 2D float32 array.
+            image: 2D or 3D float32 array.
 
         Returns:
-            Normalized 2D float32 array with values in [0, 1].
+            Normalized CHW float32 array with values in [0, 1].
         """
-        # Replace NaN/Inf with 0
-        image = np.nan_to_num(image, nan=0.0, posinf=0.0, neginf=0.0)
-
-        if self.normalization == "minmax":
-            vmin, vmax = image.min(), image.max()
-            if vmax - vmin > 1e-10:
-                image = (image - vmin) / (vmax - vmin)
-            else:
-                image = np.zeros_like(image)
-
-        elif self.normalization == "percentile":
-            # Percentile clipping handles cosmic rays and hot pixels
-            low, high = self.percentile_clip
-            vmin = np.percentile(image, low)
-            vmax = np.percentile(image, high)
-            if vmax - vmin > 1e-10:
-                image = np.clip(image, vmin, vmax)
-                image = (image - vmin) / (vmax - vmin)
-            else:
-                image = np.zeros_like(image)
-
-        elif self.normalization == "zscore":
-            mean, std = image.mean(), image.std()
-            if std > 1e-10:
-                image = (image - mean) / std
-                # Clip to [-3, 3] sigmas and rescale to [0, 1]
-                image = np.clip(image, -3.0, 3.0)
-                image = (image + 3.0) / 6.0
-            else:
-                image = np.zeros_like(image)
-
-        return image.astype(np.float32)
+        normalized = normalize_fits_data(
+            image,
+            header=header,
+            normalization=self.normalization,
+            percentile_clip=self.percentile_clip,
+        )
+        self.default_channels = normalized.shape[0]
+        return normalized.astype(np.float32)
 
     def resize(self, image: np.ndarray, size: int) -> np.ndarray:
         """
@@ -214,37 +194,22 @@ class FITSDataset:
         Uses NumPy-only implementation to stay framework-agnostic.
 
         Args:
-            image: 2D float32 array of any shape.
+            image: CHW float32 array of any shape.
             size: Target dimension (both width and height).
 
         Returns:
-            Resized 2D float32 array of shape (size, size).
+            Resized CHW float32 array of shape (C, size, size).
         """
-        h, w = image.shape
-        if h == size and w == size:
-            return image
-
-        # Bilinear interpolation via coordinate mapping
-        y_coords = np.linspace(0, h - 1, size)
-        x_coords = np.linspace(0, w - 1, size)
-        xv, yv = np.meshgrid(x_coords, y_coords)
-
-        x0 = np.floor(xv).astype(int)
-        y0 = np.floor(yv).astype(int)
-        x1 = np.minimum(x0 + 1, w - 1)
-        y1 = np.minimum(y0 + 1, h - 1)
-
-        dx = xv - x0
-        dy = yv - y0
-
-        resized = (
-            image[y0, x0] * (1 - dx) * (1 - dy)
-            + image[y0, x1] * dx * (1 - dy)
-            + image[y1, x0] * (1 - dx) * dy
-            + image[y1, x1] * dx * dy
-        )
-
+        resized = resize_chw(image, size)
+        self.default_channels = resized.shape[0]
         return resized.astype(np.float32)
+
+    def empty_item(self) -> np.ndarray:
+        """Return an all-zero CHW tensor matching the current channel count."""
+        return np.zeros(
+            (self.default_channels, self.target_size, self.target_size),
+            dtype=np.float32,
+        )
 
     def __getitem__(self, idx: int) -> Optional[np.ndarray]:
         """
@@ -254,20 +219,17 @@ class FITSDataset:
             idx: Index into the file index.
 
         Returns:
-            NumPy array of shape (1, target_size, target_size) — CHW format,
-            single channel. Returns None if loading fails.
+            NumPy array of shape (C, target_size, target_size) in CHW format.
+            Returns None if loading fails.
         """
         entry = self.index[idx]
-        image = self.load_fits(entry["path"])
+        image, header = self.load_fits(entry["path"])
 
         if image is None:
             return None
 
-        image = self.normalize(image)
+        image = self.normalize(image, header=header)
         image = self.resize(image, self.target_size)
-
-        # Add channel dimension: (H, W) -> (1, H, W) for CHW format
-        image = image[np.newaxis, :, :]
 
         return image
 

@@ -22,17 +22,33 @@ sys.path.insert(0, str(project_root))
 
 logger = logging.getLogger(__name__)
 
-# All 9 configurations
-CONFIGS = [
-    {"method": "mae", "framework": fw}
-    for fw in ("timm", "hf", "jax")
-] + [
-    {"method": "dino", "framework": fw}
-    for fw in ("timm", "hf", "jax")
-] + [
-    {"method": "mae_dino", "framework": fw}
-    for fw in ("timm", "hf", "jax")
-]
+def _parse_experiment_name(exp_name: str) -> dict:
+    """Parse experiment directory names like pilot_mae_timm_tiny or full_mae_timm_small."""
+    parts = exp_name.split("_")
+    parsed = {"name": exp_name}
+
+    if len(parts) >= 4 and parts[0] in {"pilot", "full"}:
+        parsed["stage"] = parts[0]
+        if parts[1] == "mae" and parts[2] == "dino":
+            parsed["method"] = "mae_dino"
+            parsed["framework"] = parts[3] if len(parts) > 3 else "unknown"
+            parsed["vit_size"] = parts[4] if len(parts) > 4 else "tiny"
+        else:
+            parsed["method"] = parts[1]
+            parsed["framework"] = parts[2] if len(parts) > 2 else "unknown"
+            parsed["vit_size"] = parts[3] if len(parts) > 3 else "tiny"
+        return parsed
+
+    if len(parts) >= 3:
+        if parts[0] == "mae" and parts[1] == "dino":
+            parsed["method"] = "mae_dino"
+            parsed["framework"] = parts[2] if len(parts) > 2 else "unknown"
+            parsed["vit_size"] = parts[3] if len(parts) > 3 else "tiny"
+        else:
+            parsed["method"] = parts[0]
+            parsed["framework"] = parts[1]
+            parsed["vit_size"] = parts[2] if len(parts) > 2 else "tiny"
+    return parsed
 
 
 def collect_metrics(results_dir: str) -> list:
@@ -55,14 +71,7 @@ def collect_metrics(results_dir: str) -> list:
         if not exp_dir.is_dir():
             continue
 
-        metric = {"name": exp_dir.name}
-
-        # Parse experiment name
-        parts = exp_dir.name.split("_")
-        if len(parts) >= 2:
-            metric["method"] = parts[0]
-            metric["framework"] = parts[1]
-            metric["vit_size"] = parts[2] if len(parts) > 2 else "tiny"
+        metric = _parse_experiment_name(exp_dir.name)
 
         # Load embedding metadata
         emb_path = exp_dir / "embeddings.h5"
@@ -82,7 +91,9 @@ def collect_metrics(results_dir: str) -> list:
                     metric["n_clusters"] = len(np.unique(labels))
 
         # Load training log for final loss
-        log_path = exp_dir / "train.log"
+        log_path = exp_dir / "logs" / "train.log"
+        if not log_path.exists():
+            log_path = exp_dir / "train.log"
         if log_path.exists():
             last_loss = _parse_last_loss(log_path)
             if last_loss is not None:
@@ -94,14 +105,39 @@ def collect_metrics(results_dir: str) -> list:
             with open(sil_path) as f:
                 sil_data = json.load(f)
                 metric["silhouette"] = sil_data.get("silhouette", None)
+        elif cluster_path.exists():
+            try:
+                from sklearn.metrics import silhouette_score
+                import h5py
+
+                with h5py.File(cluster_path, "r") as f:
+                    if "labels" in f and "embeddings" in f:
+                        labels = f["labels"][:]
+                        embeddings = f["embeddings"][:]
+                        if len(np.unique(labels)) > 1:
+                            metric["silhouette"] = float(
+                                silhouette_score(
+                                    embeddings,
+                                    labels,
+                                    sample_size=min(10000, len(embeddings)),
+                                    random_state=42,
+                                )
+                            )
+            except Exception as exc:
+                logger.warning(f"Failed to compute silhouette for {exp_dir.name}: {exc}")
 
         # Classification results
         for eval_type in ("linear_probe", "fine_tune"):
-            report_path = exp_dir / "eval" / eval_type / "classification_report.txt"
-            if report_path.exists():
-                acc = _parse_accuracy(report_path)
-                if acc is not None:
-                    metric[f"{eval_type}_acc"] = acc
+            candidate_paths = [
+                exp_dir / "eval" / eval_type / "classification_report.txt",
+                exp_dir / "eval" / "classification" / eval_type / "classification_report.txt",
+            ]
+            for report_path in candidate_paths:
+                if report_path.exists():
+                    acc = _parse_accuracy(report_path)
+                    if acc is not None:
+                        metric[f"{eval_type}_acc"] = acc
+                    break
 
         all_metrics.append(metric)
 

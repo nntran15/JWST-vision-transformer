@@ -17,6 +17,8 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
+from src.data.fits_preprocessing import normalize_fits_data, resize_chw
+
 logger = logging.getLogger(__name__)
 
 
@@ -40,6 +42,7 @@ class LabeledFITSDataset(Dataset):
         self.target_size = target_size
         self.samples = []
         self.label_names = []
+        self.default_channels = 1
 
         with open(csv_path) as f:
             reader = csv.DictReader(f)
@@ -72,22 +75,16 @@ class LabeledFITSDataset(Dataset):
             from astropy.io import fits as fits_io
             with fits_io.open(path, memmap=False) as hdul:
                 data = hdul[0].data.astype(np.float32)
+                header = hdul[0].header
         except Exception:
-            data = np.zeros((self.target_size, self.target_size), dtype=np.float32)
+            data = np.zeros((self.default_channels, self.target_size, self.target_size), dtype=np.float32)
+            header = None
 
-        # Normalize
-        p1, p99 = np.percentile(data, [1, 99])
-        if p99 > p1:
-            data = (data - p1) / (p99 - p1)
-        data = np.clip(data, 0, 1)
+        data = normalize_fits_data(data, header=header, normalization="header")
+        data = resize_chw(data, self.target_size)
+        self.default_channels = data.shape[0]
 
-        # Resize
-        from skimage.transform import resize
-        if data.shape != (self.target_size, self.target_size):
-            data = resize(data, (self.target_size, self.target_size),
-                          anti_aliasing=True, preserve_range=True).astype(np.float32)
-
-        tensor = torch.from_numpy(data).unsqueeze(0)  # (1, H, W)
+        tensor = torch.from_numpy(data)
         label_idx = self.label_to_idx[label]
 
         return tensor, label_idx

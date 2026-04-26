@@ -2,7 +2,7 @@
 """
 Astronomy-aware data augmentations for galaxy thumbnail images.
 
-Designed for single-channel FITS images. Key considerations:
+Designed for FITS images in CHW format. Key considerations:
 - Galaxies have no preferred orientation → free rotation/flip
 - No color jitter (single-channel data)
 - Noise injection simulates observational conditions
@@ -15,10 +15,10 @@ import numpy as np
 
 class AstronomyAugmentations:
     """
-    Augmentation pipeline for single-channel galaxy thumbnails.
+    Augmentation pipeline for galaxy thumbnails.
 
     Applied during SSL pretraining. All operations work on NumPy arrays
-    in CHW format (1, H, W) with values in [0, 1].
+    in CHW format (C, H, W) with values in [0, 1].
 
     Args:
         rotation: Enable random 90-degree rotations.
@@ -56,7 +56,7 @@ class AstronomyAugmentations:
         Apply augmentations to a single image.
 
         Args:
-            image: NumPy array of shape (1, H, W), values in [0, 1].
+            image: NumPy array of shape (C, H, W), values in [0, 1].
             rng: NumPy random generator for reproducibility.
 
         Returns:
@@ -173,7 +173,7 @@ class DINOMultiCropAugmentation:
         Generate multi-crop views of a single image.
 
         Args:
-            image: NumPy array of shape (1, H, W), values in [0, 1].
+            image: NumPy array of shape (C, H, W), values in [0, 1].
             rng: NumPy random generator.
 
         Returns:
@@ -222,8 +222,8 @@ class DINOMultiCropAugmentation:
 
     @staticmethod
     def _resize(image: np.ndarray, size: int) -> np.ndarray:
-        """Resize CHW image to (1, size, size) via bilinear interpolation."""
-        _, h, w = image.shape
+        """Resize a CHW image to (C, size, size) via bilinear interpolation."""
+        c, h, w = image.shape
         if h == size and w == size:
             return image.copy()
 
@@ -239,11 +239,14 @@ class DINOMultiCropAugmentation:
         dx = xv - x0
         dy = yv - y0
 
-        resized = (
-            image[0, y0, x0] * (1 - dx) * (1 - dy)
-            + image[0, y0, x1] * dx * (1 - dy)
-            + image[0, y1, x0] * (1 - dx) * dy
-            + image[0, y1, x1] * dx * dy
-        )
+        resized_channels = []
+        for channel_idx in range(c):
+            resized = (
+                image[channel_idx, y0, x0] * (1 - dx) * (1 - dy)
+                + image[channel_idx, y0, x1] * dx * (1 - dy)
+                + image[channel_idx, y1, x0] * (1 - dx) * dy
+                + image[channel_idx, y1, x1] * dx * dy
+            )
+            resized_channels.append(resized.astype(np.float32))
 
-        return resized[np.newaxis, :, :].astype(np.float32)
+        return np.stack(resized_channels, axis=0)

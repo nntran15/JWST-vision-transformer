@@ -69,7 +69,7 @@ class PyTorchFITSDataset(Dataset):
                 continue
 
         # Final fallback: return zeros
-        return torch.zeros(1, self.dataset.target_size, self.dataset.target_size)
+        return torch.from_numpy(self.dataset.empty_item())
 
 
 class DINOMultiCropDataset(Dataset):
@@ -120,9 +120,10 @@ class DINOMultiCropDataset(Dataset):
         # Fallback
         gs = self.multi_crop.global_crop_size
         ls = self.multi_crop.local_crop_size
+        c = self.dataset.default_channels
         return (
-            [torch.zeros(1, gs, gs) for _ in range(2)],
-            [torch.zeros(1, ls, ls) for _ in range(self.multi_crop.n_local_crops)],
+            [torch.zeros(c, gs, gs) for _ in range(2)],
+            [torch.zeros(c, ls, ls) for _ in range(self.multi_crop.n_local_crops)],
         )
 
 

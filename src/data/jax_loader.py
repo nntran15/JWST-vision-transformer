@@ -76,10 +76,7 @@ class JAXDataIterator:
                 return image
             idx = self.rng.integers(0, len(self.dataset))
 
-        return np.zeros(
-            (1, self.dataset.target_size, self.dataset.target_size),
-            dtype=np.float32,
-        )
+        return self.dataset.empty_item()
 
     def __iter__(self) -> Iterator[np.ndarray]:
         """
@@ -176,9 +173,10 @@ class JAXDINODataIterator:
         # Fallback
         gs = self.multi_crop.global_crop_size
         ls = self.multi_crop.local_crop_size
+        c = self.dataset.default_channels
         return (
-            [np.zeros((1, gs, gs), dtype=np.float32) for _ in range(2)],
-            [np.zeros((1, ls, ls), dtype=np.float32) for _ in range(self.multi_crop.n_local_crops)],
+            [np.zeros((c, gs, gs), dtype=np.float32) for _ in range(2)],
+            [np.zeros((c, ls, ls), dtype=np.float32) for _ in range(self.multi_crop.n_local_crops)],
         )
 
     def _shard(self, arr: np.ndarray) -> np.ndarray:

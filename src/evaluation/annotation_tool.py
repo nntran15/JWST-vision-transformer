@@ -12,6 +12,8 @@ from typing import Optional
 
 import numpy as np
 
+from src.data.fits_preprocessing import make_display_image
+
 logger = logging.getLogger(__name__)
 
 
@@ -78,8 +80,6 @@ def display_cluster_grid(
         n_cols: Number of columns in the grid.
         figsize_per_image: Size per image in inches.
     """
-    import matplotlib
-    matplotlib.use("TkAgg")
     import matplotlib.pyplot as plt
     from astropy.io import fits
 
@@ -101,8 +101,12 @@ def display_cluster_grid(
             try:
                 with fits.open(image_paths[i], memmap=False) as hdul:
                     data = hdul[0].data.astype(np.float32)
-                    vmin, vmax = np.percentile(data, [1, 99])
-                    ax.imshow(data, cmap="gray", vmin=vmin, vmax=vmax, origin="lower")
+                    header = hdul[0].header
+                    display = make_display_image(data, header=header, normalization="header")
+                    if display.ndim == 2:
+                        ax.imshow(display, cmap="gray", vmin=0.0, vmax=1.0, origin="lower")
+                    else:
+                        ax.imshow(display, origin="lower")
                     ax.set_title(Path(image_paths[i]).stem, fontsize=6)
             except Exception as e:
                 ax.text(0.5, 0.5, "Error", ha="center", va="center")
