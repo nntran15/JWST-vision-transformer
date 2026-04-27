@@ -1,6 +1,26 @@
 import numpy as np
 
-from src.data.fits_preprocessing import compose_multiband_rgb
+from src.data.fits_preprocessing import collapse_to_single_channel, compose_multiband_rgb
+
+
+def test_collapse_to_single_channel_uses_brightest_band_per_pixel():
+    image = np.array(
+        [
+            [[0.10, 0.20], [0.30, 0.40]],
+            [[0.05, 0.25], [0.35, 0.10]],
+            [[0.08, 0.15], [0.05, 0.90]],
+            [[0.12, 0.05], [0.70, 0.20]],
+        ],
+        dtype=np.float32,
+    )
+
+    collapsed = collapse_to_single_channel(image)
+
+    assert collapsed.shape == (1, 2, 2)
+    np.testing.assert_allclose(
+        collapsed[0],
+        np.array([[0.12, 0.25], [0.70, 0.90]], dtype=np.float32),
+    )
 
 
 def test_compose_multiband_rgb_suppresses_low_signal_chroma():

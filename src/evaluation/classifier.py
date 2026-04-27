@@ -17,7 +17,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
-from src.data.fits_preprocessing import normalize_fits_data, resize_chw
+from src.data.fits_preprocessing import collapse_to_single_channel, normalize_fits_data, resize_chw
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +81,7 @@ class LabeledFITSDataset(Dataset):
             header = None
 
         data = normalize_fits_data(data, header=header, normalization="header")
+        data = collapse_to_single_channel(data)
         data = resize_chw(data, self.target_size)
         self.default_channels = data.shape[0]
 

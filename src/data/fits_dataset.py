@@ -21,7 +21,7 @@ import numpy as np
 from astropy.io import fits
 from tqdm import tqdm
 
-from .fits_preprocessing import normalize_fits_data, resize_chw
+from .fits_preprocessing import collapse_to_single_channel, normalize_fits_data, resize_chw
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +184,7 @@ class FITSDataset:
             normalization=self.normalization,
             percentile_clip=self.percentile_clip,
         )
+        normalized = collapse_to_single_channel(normalized)
         self.default_channels = normalized.shape[0]
         return normalized.astype(np.float32)
 
