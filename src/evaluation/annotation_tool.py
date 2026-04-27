@@ -1,12 +1,8 @@
-"""
-Matplotlib-based annotation tool for cluster-then-verify labeling.
-
-Displays representative samples from each cluster for human verification.
-Outputs labeled data as a CSV for downstream classification training.
-"""
+"""Matplotlib-based annotation tool for cluster-then-verify labeling."""
 
 import csv
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -17,6 +13,17 @@ from src.data.fits_preprocessing import make_display_image
 logger = logging.getLogger(__name__)
 
 
+def has_interactive_display() -> bool:
+    """Return True when matplotlib can open interactive windows."""
+    import matplotlib
+
+    backend = matplotlib.get_backend().lower()
+    if backend in {"agg", "pdf", "ps", "svg", "template", "cairo"}:
+        return False
+
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
 def get_cluster_representatives(
     embeddings: np.ndarray,
     labels: np.ndarray,
@@ -24,41 +31,29 @@ def get_cluster_representatives(
     n_per_cluster: int = 20,
     method: str = "nearest_centroid",
 ) -> dict:
-    """
-    Select representative images for each cluster.
-
-    Args:
-        embeddings: (N, D) embedding matrix.
-        labels: (N,) cluster assignment array.
-        paths: List of file paths.
-        n_per_cluster: Number of representatives per cluster.
-        method: 'nearest_centroid' (closest to centroid) or 'random'.
-
-    Returns:
-        Dict mapping cluster_id → list of (path, distance_to_centroid).
-    """
+    """Select representative images for each cluster."""
     unique_labels = np.unique(labels)
     representatives = {}
 
     for cluster_id in unique_labels:
         mask = labels == cluster_id
         cluster_embeddings = embeddings[mask]
-        cluster_paths = [p for p, m in zip(paths, mask) if m]
+        cluster_paths = [path for path, keep in zip(paths, mask) if keep]
 
         if method == "nearest_centroid":
             centroid = cluster_embeddings.mean(axis=0)
             distances = np.linalg.norm(cluster_embeddings - centroid, axis=1)
             sorted_idx = np.argsort(distances)
-            n = min(n_per_cluster, len(sorted_idx))
+            count = min(n_per_cluster, len(sorted_idx))
             reps = [
-                (cluster_paths[i], float(distances[i]))
-                for i in sorted_idx[:n]
+                (cluster_paths[idx], float(distances[idx]))
+                for idx in sorted_idx[:count]
             ]
         else:
             rng = np.random.RandomState(42)
-            n = min(n_per_cluster, len(cluster_paths))
-            idx = rng.choice(len(cluster_paths), n, replace=False)
-            reps = [(cluster_paths[i], 0.0) for i in idx]
+            count = min(n_per_cluster, len(cluster_paths))
+            sampled_idx = rng.choice(len(cluster_paths), count, replace=False)
+            reps = [(cluster_paths[idx], 0.0) for idx in sampled_idx]
 
         representatives[int(cluster_id)] = reps
 
@@ -70,16 +65,10 @@ def display_cluster_grid(
     image_paths: list,
     n_cols: int = 5,
     figsize_per_image: float = 2.0,
-) -> None:
-    """
-    Display a grid of images from a cluster using matplotlib.
-
-    Args:
-        cluster_id: The cluster ID being displayed.
-        image_paths: List of FITS file paths.
-        n_cols: Number of columns in the grid.
-        figsize_per_image: Size per image in inches.
-    """
+    output_path: Optional[str] = None,
+    show: bool = True,
+) -> Optional[Path]:
+    """Display a grid of images from a cluster using matplotlib."""
     import matplotlib.pyplot as plt
     from astropy.io import fits
 
@@ -87,19 +76,20 @@ def display_cluster_grid(
     n_rows = (n_images + n_cols - 1) // n_cols
 
     fig, axes = plt.subplots(
-        n_rows, n_cols,
+        n_rows,
+        n_cols,
         figsize=(n_cols * figsize_per_image, n_rows * figsize_per_image),
     )
     if n_rows == 1:
         axes = [axes]
     axes = np.array(axes).flatten()
 
-    fig.suptitle(f"Cluster {cluster_id} — {n_images} samples", fontsize=14)
+    fig.suptitle(f"Cluster {cluster_id} - {n_images} samples", fontsize=14)
 
-    for i, ax in enumerate(axes):
-        if i < n_images:
+    for idx, ax in enumerate(axes):
+        if idx < n_images:
             try:
-                with fits.open(image_paths[i], memmap=False) as hdul:
+                with fits.open(image_paths[idx], memmap=False) as hdul:
                     data = hdul[0].data.astype(np.float32)
                     header = hdul[0].header
                     display = make_display_image(data, header=header, normalization="header")
@@ -107,48 +97,48 @@ def display_cluster_grid(
                         ax.imshow(display, cmap="gray", vmin=0.0, vmax=1.0, origin="lower")
                     else:
                         ax.imshow(display, origin="lower")
-                    ax.set_title(Path(image_paths[i]).stem, fontsize=6)
-            except Exception as e:
+                    ax.set_title(Path(image_paths[idx]).stem, fontsize=6)
+            except Exception as exc:
                 ax.text(0.5, 0.5, "Error", ha="center", va="center")
-                logger.warning(f"Failed to load {image_paths[i]}: {e}")
+                logger.warning(f"Failed to load {image_paths[idx]}: {exc}")
         ax.axis("off")
 
     plt.tight_layout()
-    plt.show()
+    saved_path = None
+    if output_path is not None:
+        saved_path = Path(output_path)
+        saved_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(saved_path, dpi=200, bbox_inches="tight")
+
+    if show:
+        plt.show()
+    plt.close(fig)
+
+    return saved_path
 
 
 def interactive_label_clusters(
     representatives: dict,
     output_csv: str,
     label_options: Optional[list] = None,
+    preview_dir: Optional[str] = None,
+    show_images: Optional[bool] = None,
 ) -> str:
-    """
-    Interactive CLI labeling tool for cluster-then-verify strategy.
-
-    Displays each cluster's representatives and asks the user to assign
-    a label or mark for further review.
-
-    Args:
-        representatives: Dict from get_cluster_representatives().
-        output_csv: Path to save labeled CSV.
-        label_options: Optional list of predefined labels (e.g., ['spiral', 'elliptical', ...]).
-
-    Returns:
-        Path to the output CSV.
-    """
+    """Interactively assign one of the allowed labels to each cluster."""
     if label_options is None:
         label_options = [
             "spiral",
-            "barred_spiral",
-            "elliptical",
-            "irregular",
-            "merger",
-            "edge_on",
+            "not_spiral",
             "artifact",
             "uncertain",
         ]
 
     Path(output_csv).parent.mkdir(parents=True, exist_ok=True)
+    if preview_dir is not None:
+        Path(preview_dir).mkdir(parents=True, exist_ok=True)
+
+    if show_images is None:
+        show_images = has_interactive_display()
 
     labels_assigned = {}
     cluster_ids = sorted(representatives.keys())
@@ -158,50 +148,70 @@ def interactive_label_clusters(
     print("=" * 60)
     print(f"\nTotal clusters: {len(cluster_ids)}")
     print(f"Predefined labels: {label_options}")
-    print("Enter a number to select a label, or type a custom label.")
+    print("Enter a number to select a label.")
     print("Enter 'skip' to skip, 'quit' to stop early.\n")
+    if not show_images:
+        print("Interactive plotting is unavailable in this session; representative grids will be saved to disk.\n")
 
     for cluster_id in cluster_ids:
         reps = representatives[cluster_id]
-        image_paths = [r[0] for r in reps]
+        image_paths = [path for path, _ in reps]
 
         print(f"\n--- Cluster {cluster_id} ({len(reps)} representatives) ---")
 
         try:
-            display_cluster_grid(cluster_id, image_paths)
-        except Exception as e:
-            logger.warning(f"Could not display cluster {cluster_id}: {e}")
-            print(f"  (Display failed — showing file paths instead)")
-            for i, (path, dist) in enumerate(reps[:5]):
-                print(f"    [{i}] {Path(path).name} (dist={dist:.4f})")
+            preview_path = None
+            if preview_dir is not None:
+                preview_path = str(Path(preview_dir) / f"cluster_{cluster_id:03d}.png")
 
-        # Show label options
+            saved_path = display_cluster_grid(
+                cluster_id,
+                image_paths,
+                output_path=preview_path,
+                show=show_images,
+            )
+            if saved_path is not None:
+                print(f"Saved representative grid: {saved_path}")
+        except Exception as exc:
+            logger.warning(f"Could not display cluster {cluster_id}: {exc}")
+            print("  (Display failed - showing file paths instead)")
+            for idx, (path, dist) in enumerate(reps[:5]):
+                print(f"    [{idx}] {Path(path).name} (dist={dist:.4f})")
+
         print("\nLabel options:")
-        for i, label in enumerate(label_options):
-            print(f"  [{i}] {label}")
+        for idx, label in enumerate(label_options):
+            print(f"  [{idx}] {label}")
 
-        user_input = input(f"\nLabel for cluster {cluster_id}: ").strip()
+        while True:
+            user_input = input(f"\nLabel for cluster {cluster_id}: ").strip().lower()
 
-        if user_input.lower() == "quit":
-            print("Stopping early.")
+            if user_input == "quit":
+                print("Stopping early.")
+                labels_assigned[cluster_id] = None
+                break
+            if user_input == "skip":
+                labels_assigned[cluster_id] = "unlabeled"
+                break
+            if user_input.isdigit() and int(user_input) < len(label_options):
+                labels_assigned[cluster_id] = label_options[int(user_input)]
+                break
+            if user_input in label_options:
+                labels_assigned[cluster_id] = user_input
+                break
+
+            print("Invalid input. Choose a label number, type an allowed label, or use 'skip'/'quit'.")
+
+        if labels_assigned[cluster_id] is None:
             break
-        elif user_input.lower() == "skip":
-            labels_assigned[cluster_id] = "unlabeled"
-            continue
-        elif user_input.isdigit() and int(user_input) < len(label_options):
-            labels_assigned[cluster_id] = label_options[int(user_input)]
-        else:
-            labels_assigned[cluster_id] = user_input if user_input else "unlabeled"
 
-        print(f"  → Assigned: {labels_assigned[cluster_id]}")
+        print(f"  -> Assigned: {labels_assigned[cluster_id]}")
 
-    # Write CSV
-    with open(output_csv, "w", newline="") as f:
-        writer = csv.writer(f)
+    with open(output_csv, "w", newline="") as handle:
+        writer = csv.writer(handle)
         writer.writerow(["file_path", "cluster_id", "label"])
         for cluster_id, reps in representatives.items():
             label = labels_assigned.get(cluster_id, "unlabeled")
-            for path, dist in reps:
+            for path, _ in reps:
                 writer.writerow([path, cluster_id, label])
 
     print(f"\nLabeled data saved to {output_csv}")
@@ -214,41 +224,25 @@ def propagate_labels(
     all_paths: list,
     output_csv: str,
 ) -> str:
-    """
-    Propagate cluster-level labels to all images in those clusters.
-
-    Takes verified labels from the annotation tool and assigns them to
-    all images sharing the same cluster assignment.
-
-    Args:
-        labels_csv: CSV from interactive_label_clusters() with cluster → label mapping.
-        cluster_labels: (N,) cluster assignment array for all images.
-        all_paths: List of all image file paths.
-        output_csv: Output CSV with full propagated labels.
-
-    Returns:
-        Path to full labeled CSV.
-    """
-    # Read cluster → label mapping from CSV
+    """Propagate cluster labels to all images assigned to each cluster."""
     cluster_to_label = {}
-    with open(labels_csv) as f:
-        reader = csv.DictReader(f)
+    with open(labels_csv) as handle:
+        reader = csv.DictReader(handle)
         for row in reader:
-            cid = int(row["cluster_id"])
-            if cid not in cluster_to_label:
-                cluster_to_label[cid] = row["label"]
+            cluster_id = int(row["cluster_id"])
+            if cluster_id not in cluster_to_label:
+                cluster_to_label[cluster_id] = row["label"]
 
-    # Propagate
     Path(output_csv).parent.mkdir(parents=True, exist_ok=True)
 
     count = 0
-    with open(output_csv, "w", newline="") as f:
-        writer = csv.writer(f)
+    with open(output_csv, "w", newline="") as handle:
+        writer = csv.writer(handle)
         writer.writerow(["file_path", "cluster_id", "label"])
-        for path, cid in zip(all_paths, cluster_labels):
-            label = cluster_to_label.get(int(cid), "unlabeled")
-            writer.writerow([path, int(cid), label])
+        for path, cluster_id in zip(all_paths, cluster_labels):
+            label = cluster_to_label.get(int(cluster_id), "unlabeled")
+            writer.writerow([path, int(cluster_id), label])
             count += 1
 
-    logger.info(f"Propagated labels to {count} images → {output_csv}")
+    logger.info(f"Propagated labels to {count} images -> {output_csv}")
     return output_csv

@@ -52,6 +52,7 @@ def extract_pytorch(
     vit_size: str,
     fits_dataset,
     output_path: str,
+    catalog_dir: str,
     batch_size: int = 256,
     max_samples: int = -1,
     device_str: str = "cuda",
@@ -129,7 +130,15 @@ def extract_pytorch(
     embeddings = np.concatenate(all_embeddings, axis=0)
 
     # Save to HDF5
-    _save_hdf5(output_path, embeddings, all_paths, vit_config, method, framework)
+    _save_hdf5(
+        output_path,
+        embeddings,
+        all_paths,
+        vit_config,
+        method,
+        framework,
+        catalog_dir=catalog_dir,
+    )
 
     logger.info(f"Saved {embeddings.shape[0]} embeddings of dim {embeddings.shape[1]} to {output_path}")
     return embeddings
@@ -141,6 +150,7 @@ def extract_jax(
     vit_size: str,
     fits_dataset,
     output_path: str,
+    catalog_dir: str,
     batch_size: int = 256,
     max_samples: int = -1,
 ):
@@ -197,13 +207,21 @@ def extract_jax(
 
     embeddings = np.concatenate(all_embeddings, axis=0)
     all_paths = [fits_dataset.get_metadata(i)["path"] for i in range(len(fits_dataset))]
-    _save_hdf5(output_path, embeddings, all_paths, vit_config, method, "jax")
+    _save_hdf5(
+        output_path,
+        embeddings,
+        all_paths,
+        vit_config,
+        method,
+        "jax",
+        catalog_dir=catalog_dir,
+    )
 
     logger.info(f"Saved {embeddings.shape[0]} JAX embeddings to {output_path}")
     return embeddings
 
 
-def _save_hdf5(output_path, embeddings, paths, vit_config, method, framework):
+def _save_hdf5(output_path, embeddings, paths, vit_config, method, framework, catalog_dir=None):
     """Save embeddings and metadata to HDF5 file."""
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
@@ -222,6 +240,8 @@ def _save_hdf5(output_path, embeddings, paths, vit_config, method, framework):
         f.attrs["method"] = method
         f.attrs["framework"] = framework
         f.attrs["n_samples"] = embeddings.shape[0]
+        if catalog_dir:
+            f.attrs["catalog_dir"] = str(catalog_dir)
 
 
 def main():
@@ -258,6 +278,7 @@ def main():
             vit_size=args.vit_size,
             fits_dataset=fits_dataset,
             output_path=args.output,
+            catalog_dir=args.catalog_dir,
             batch_size=args.batch_size,
             max_samples=args.max_samples,
             device_str=args.device,
@@ -269,6 +290,7 @@ def main():
             vit_size=args.vit_size,
             fits_dataset=fits_dataset,
             output_path=args.output,
+            catalog_dir=args.catalog_dir,
             batch_size=args.batch_size,
             max_samples=args.max_samples,
         )

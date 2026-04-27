@@ -2,25 +2,32 @@
 """
 End-to-end evaluation pipeline.
 
-Runs clustering, UMAP visualization, and optional classification
-on extracted SSL embeddings.
+Runs clustering and UMAP by default, with optional k-sweep,
+interactive cluster labeling, and classification on extracted SSL embeddings.
 
 Usage:
-  # Full pipeline: clustering + UMAP + elbow plot
-  python scripts/evaluate.py \
-    --embeddings output/embeddings.h5 \
-    --output_dir output/eval
+    # Default evaluation: clustering + UMAP only
+    python scripts/evaluate.py \
+        --embeddings output/experiments/pilot_mae_timm_tiny/embeddings.h5 \
+        --output_dir output/eval
 
-  # Cluster-then-verify labeling
-  python scripts/evaluate.py \
-    --embeddings output/embeddings.h5 \
-    --label --output_dir output/eval
+    # Add elbow plot by sweeping k
+    python scripts/evaluate.py \
+        --embeddings output/experiments/pilot_mae_timm_tiny/embeddings.h5 \
+        --output_dir output/eval \
+        --sweep_k --k_min 2 --k_max 10 --k_step 1 --k_selection elbow
 
-  # Linear probe / fine-tune (requires labeled CSV)
-  python scripts/evaluate.py \
-    --classify --labels_csv output/eval/labels.csv \
-    --checkpoint output/checkpoints/checkpoint_best.pt \
-    --framework timm --method mae
+    # Show representative images and label clusters interactively
+    python scripts/evaluate.py \
+        --embeddings output/experiments/pilot_mae_timm_tiny/embeddings.h5 \
+        --output_dir output/eval \
+        --sweep_k --label --reps_per_cluster 20
+
+    # Linear probe / fine-tune (requires labeled CSV)
+    python scripts/evaluate.py \
+        --classify --labels_csv output/eval/labels.csv \
+        --checkpoint output/checkpoints/checkpoint_best.pt \
+        --framework timm --method mae
 """
 
 import argparse
@@ -34,6 +41,65 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 logger = logging.getLogger(__name__)
+LEGACY_DEFAULT_EMBEDDINGS = Path("output/embeddings.h5")
+
+
+def _discover_experiment_embeddings(root_dir: Path, limit: int | None = None) -> list[Path]:
+    """Return experiment-scoped embedding artifacts sorted by newest first."""
+    experiments_dir = root_dir / "output" / "experiments"
+    if not experiments_dir.exists():
+        return []
+
+    candidates = sorted(
+        (path for path in experiments_dir.glob("*/embeddings.h5") if path.is_file()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if limit is not None:
+        return candidates[:limit]
+    return candidates
+
+
+def _format_embedding_candidates(candidates: list[Path], root_dir: Path) -> str:
+    if not candidates:
+        return ""
+
+    lines = []
+    for candidate in candidates:
+        try:
+            display_path = candidate.relative_to(root_dir)
+        except ValueError:
+            display_path = candidate
+        lines.append(f"  - {display_path}")
+    return "\n".join(lines)
+
+
+def resolve_embeddings_path(requested_path: str, root_dir: Path | None = None) -> Path:
+    """Resolve the requested embeddings file, including the legacy default path."""
+    root_dir = root_dir or project_root
+    path = Path(requested_path)
+    if path.exists():
+        return path
+
+    candidates = _discover_experiment_embeddings(root_dir)
+    if path == LEGACY_DEFAULT_EMBEDDINGS and candidates:
+        selected_path = candidates[0]
+        logger.warning(
+            "Embeddings not found at %s; using newest experiment artifact %s",
+            path,
+            selected_path,
+        )
+        return selected_path
+
+    hint = ""
+    if candidates:
+        hint = (
+            "\nAvailable experiment embeddings:\n"
+            f"{_format_embedding_candidates(candidates[:5], root_dir)}"
+            "\nPass one of these paths with --embeddings."
+        )
+
+    raise FileNotFoundError(f"Embeddings file not found: {path}{hint}")
 
 
 def run_clustering_pipeline(args):
@@ -64,15 +130,23 @@ def run_clustering_pipeline(args):
             k_range=(args.k_min, args.k_max),
             step=args.k_step,
             seed=args.seed,
+            selection_strategy=args.k_selection,
         )
         plot_elbow(
             sweep_results["ks"],
             sweep_results["inertias"],
             sweep_results["silhouettes"],
             str(output_dir / "elbow_plot.png"),
+            selected_k=sweep_results["best_k"],
+            selection_strategy=sweep_results["selection_strategy"],
         )
         n_clusters = sweep_results["best_k"]
-        logger.info(f"Best k from sweep: {n_clusters}")
+        logger.info(
+            "Selected k from sweep: %s (%s strategy; max silhouette at k=%s)",
+            n_clusters,
+            sweep_results["selection_strategy"],
+            sweep_results["best_silhouette_k"],
+        )
     else:
         n_clusters = args.n_clusters
 
@@ -131,7 +205,11 @@ def run_labeling(args, km_results, paths):
     output_dir = Path(args.output_dir)
     labels_csv = str(output_dir / "cluster_labels.csv")
 
-    interactive_label_clusters(reps, labels_csv)
+    interactive_label_clusters(
+        reps,
+        labels_csv,
+        preview_dir=str(output_dir / "cluster_representatives"),
+    )
 
     # Propagate to full dataset
     full_csv = str(output_dir / "labels.csv")
@@ -220,15 +298,34 @@ def main():
     parser = argparse.ArgumentParser(description="SSL Evaluation Pipeline")
 
     # Input
-    parser.add_argument("--embeddings", type=str, default="output/embeddings.h5")
+    parser.add_argument(
+        "--embeddings",
+        type=str,
+        default="output/embeddings.h5",
+        help=(
+            "Embeddings HDF5 path. If the legacy default is missing, "
+            "the newest output/experiments/*/embeddings.h5 is used."
+        ),
+    )
     parser.add_argument("--output_dir", type=str, default="output/eval")
 
     # Clustering
-    parser.add_argument("--n_clusters", type=int, default=10)
-    parser.add_argument("--sweep_k", action="store_true", help="Sweep over k values")
-    parser.add_argument("--k_min", type=int, default=5)
-    parser.add_argument("--k_max", type=int, default=50)
-    parser.add_argument("--k_step", type=int, default=5)
+    parser.add_argument("--n_clusters", type=int, default=4)
+    parser.add_argument(
+        "--sweep_k",
+        action="store_true",
+        help="Sweep over k values and save output_dir/elbow_plot.png before choosing best k.",
+    )
+    parser.add_argument(
+        "--k_selection",
+        type=str,
+        choices=["elbow", "silhouette"],
+        default="elbow",
+        help="How to choose k after a sweep. 'elbow' is safer for morphology labeling than raw max silhouette.",
+    )
+    parser.add_argument("--k_min", type=int, default=2)
+    parser.add_argument("--k_max", type=int, default=10)
+    parser.add_argument("--k_step", type=int, default=1)
 
     # UMAP
     parser.add_argument("--umap_neighbors", type=int, default=15)
@@ -236,7 +333,11 @@ def main():
     parser.add_argument("--umap_max_samples", type=int, default=50000)
 
     # Labeling
-    parser.add_argument("--label", action="store_true", help="Run interactive labeling")
+    parser.add_argument(
+        "--label",
+        action="store_true",
+        help="Prompt for cluster labels and save representative grids under output_dir/cluster_representatives.",
+    )
     parser.add_argument("--reps_per_cluster", type=int, default=20)
 
     # Classification
@@ -260,6 +361,7 @@ def main():
 
     # Stage 1: Clustering + UMAP
     if not args.classify:
+        args.embeddings = str(resolve_embeddings_path(args.embeddings))
         km_results, paths = run_clustering_pipeline(args)
 
         # Stage 2: Interactive labeling

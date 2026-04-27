@@ -61,6 +61,18 @@ class MAETrainer:
             1 + math.cos(math.pi * progress)
         )
 
+    def _should_skip_completed_resume(self, start_epoch: int) -> bool:
+        """Return True when the resume checkpoint already covers all configured epochs."""
+        if start_epoch < self.epochs:
+            return False
+
+        logger.info(
+            "Resume checkpoint epoch %s already satisfies configured epochs=%s; skipping training.",
+            start_epoch,
+            self.epochs,
+        )
+        return True
+
     # ---- PyTorch Training ----
 
     def train_pytorch(
@@ -83,6 +95,9 @@ class MAETrainer:
             wandb_logger: WandbLogger instance.
             start_epoch: Resume from this epoch.
         """
+        if self._should_skip_completed_resume(start_epoch):
+            return
+
         import torch
         from tqdm import tqdm
 
@@ -269,6 +284,9 @@ class MAETrainer:
             wandb_logger: WandbLogger instance.
             start_epoch: Resume epoch.
         """
+        if self._should_skip_completed_resume(start_epoch):
+            return None
+
         import jax
         import jax.numpy as jnp
         import optax

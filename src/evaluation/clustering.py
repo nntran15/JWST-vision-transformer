@@ -13,6 +13,91 @@ import numpy as np
 import h5py
 
 logger = logging.getLogger(__name__)
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def select_best_k(
+    ks: list[int],
+    inertias: list[float],
+    silhouettes: list[float],
+    strategy: str = "elbow",
+) -> int:
+    """Choose k from a sweep using either elbow or silhouette selection."""
+    if not ks:
+        raise ValueError("ks must not be empty")
+
+    if strategy == "silhouette" or len(ks) < 3:
+        return int(ks[int(np.argmax(silhouettes))])
+
+    x = np.asarray(ks, dtype=np.float64)
+    y = np.asarray(inertias, dtype=np.float64)
+
+    x_norm = (x - x.min()) / max(x.max() - x.min(), 1.0)
+    y_norm = (y - y.min()) / max(y.max() - y.min(), 1e-12)
+
+    start = np.array([x_norm[0], y_norm[0]], dtype=np.float64)
+    end = np.array([x_norm[-1], y_norm[-1]], dtype=np.float64)
+    line = end - start
+    line_norm = np.linalg.norm(line)
+
+    if line_norm <= 1e-12:
+        return int(ks[int(np.argmax(silhouettes))])
+
+    distances = []
+    for x_value, y_value in zip(x_norm, y_norm):
+        point = np.array([x_value, y_value], dtype=np.float64)
+        offset = point - start
+        distance = abs(line[0] * offset[1] - line[1] * offset[0]) / line_norm
+        distances.append(distance)
+
+    best_idx = int(np.argmax(distances))
+    return int(ks[best_idx])
+
+
+def _resolve_embedding_paths(paths: list[str], metadata: dict) -> list[str]:
+    """Resolve stored embedding paths across different environments."""
+    candidate_dirs = []
+
+    catalog_dir = metadata.get("catalog_dir")
+    if catalog_dir:
+        catalog_path = Path(str(catalog_dir))
+        if catalog_path.exists():
+            candidate_dirs.append(catalog_path)
+
+    default_dirs = [
+        PROJECT_ROOT / "data" / "JWST" / "resized_10k_files",
+        PROJECT_ROOT / "data" / "JWST" / "original_10k_files",
+    ]
+    for candidate_dir in default_dirs:
+        if candidate_dir.exists() and candidate_dir not in candidate_dirs:
+            candidate_dirs.append(candidate_dir)
+
+    resolved_paths = []
+    remapped = 0
+
+    for raw_path in paths:
+        path = Path(raw_path)
+        if path.exists():
+            resolved_paths.append(str(path))
+            continue
+
+        replacement = None
+        for candidate_dir in candidate_dirs:
+            candidate_path = candidate_dir / path.name
+            if candidate_path.exists():
+                replacement = candidate_path
+                break
+
+        if replacement is not None:
+            resolved_paths.append(str(replacement))
+            remapped += 1
+        else:
+            resolved_paths.append(raw_path)
+
+    if remapped:
+        logger.info(f"Remapped {remapped} embedding paths to the current workspace")
+
+    return resolved_paths
 
 
 def load_embeddings(h5_path: str) -> dict:
@@ -21,6 +106,7 @@ def load_embeddings(h5_path: str) -> dict:
         embeddings = f["embeddings"][:]
         paths = [p.decode("utf-8") if isinstance(p, bytes) else p for p in f["paths"][:]]
         metadata = dict(f.attrs)
+    paths = _resolve_embedding_paths(paths, metadata)
     return {"embeddings": embeddings, "paths": paths, "metadata": metadata}
 
 
@@ -70,6 +156,7 @@ def sweep_k(
     k_range: tuple = (5, 50),
     step: int = 5,
     seed: int = 42,
+    selection_strategy: str = "elbow",
 ) -> dict:
     """
     Sweep over k values to find optimal clustering.
@@ -96,14 +183,17 @@ def sweep_k(
         silhouettes.append(sil)
         logger.info(f"  k={k}: inertia={kmeans.inertia_:.2f}, silhouette={sil:.4f}")
 
-    best_idx = int(np.argmax(silhouettes))
+    best_k = select_best_k(ks, inertias, silhouettes, strategy=selection_strategy)
+    silhouette_best_k = int(ks[int(np.argmax(silhouettes))])
 
     return {
         "ks": ks,
         "inertias": inertias,
         "silhouettes": silhouettes,
-        "best_k": ks[best_idx],
-        "best_silhouette": silhouettes[best_idx],
+        "best_k": best_k,
+        "best_silhouette": float(np.max(silhouettes)),
+        "best_silhouette_k": silhouette_best_k,
+        "selection_strategy": selection_strategy,
     }
 
 
@@ -193,6 +283,8 @@ def plot_elbow(
     inertias: list,
     silhouettes: list,
     output_path: str,
+    selected_k: Optional[int] = None,
+    selection_strategy: str = "elbow",
 ):
     """Plot elbow diagram (inertia + silhouette) for k sweep."""
     import matplotlib
@@ -213,9 +305,32 @@ def plot_elbow(
     ax2.set_title("Silhouette Score vs k")
     ax2.grid(True, alpha=0.3)
 
-    best_idx = int(np.argmax(silhouettes))
-    ax2.axvline(ks[best_idx], color="green", linestyle="--", alpha=0.7,
-                label=f"Best k={ks[best_idx]}")
+    silhouette_best_k = ks[int(np.argmax(silhouettes))]
+    if selected_k is not None:
+        ax1.axvline(
+            selected_k,
+            color="green",
+            linestyle="--",
+            alpha=0.7,
+            label=f"Selected k={selected_k} ({selection_strategy})",
+        )
+        ax2.axvline(
+            selected_k,
+            color="green",
+            linestyle="--",
+            alpha=0.7,
+            label=f"Selected k={selected_k} ({selection_strategy})",
+        )
+
+    if silhouette_best_k != selected_k:
+        ax2.axvline(
+            silhouette_best_k,
+            color="gray",
+            linestyle=":",
+            alpha=0.7,
+            label=f"Max silhouette={silhouette_best_k}",
+        )
+
     ax2.legend()
 
     fig.tight_layout()

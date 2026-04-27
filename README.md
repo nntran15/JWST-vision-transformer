@@ -296,14 +296,14 @@ python scripts/extract_embeddings.py \
 python scripts/evaluate.py \
   --embeddings output/experiments/full_mae_timm_small/embeddings.h5 \
   --output_dir output/experiments/full_mae_timm_small/eval \
-  --sweep_k --k_min 5 --k_max 50 --k_step 5 \
+  --sweep_k --k_min 5 --k_max 50 --k_step 5 --k_selection elbow \
   --umap_max_samples 50000
 ```
 
 This produces:
 
 - UMAP scatter plot colored by cluster membership
-- Elbow curve (inertia vs. k) and silhouette scores
+- Elbow curve (inertia vs. k) and silhouette scores, with the selected k marked
 - Cluster assignments saved to HDF5
 
 #### 3.2 — Inspect cluster representatives
@@ -315,7 +315,7 @@ python scripts/evaluate.py \
   --label --reps_per_cluster 20
 ```
 
-For each cluster, the tool displays the images closest to the cluster center. You manually identify what each cluster contains: "cluster 7 = edge-on disks", "cluster 12 = spirals", "cluster 3 = compact ellipticals", etc. This is how unsupervised morphological taxonomy emerges.
+For each cluster, the tool displays the images closest to the cluster center when an interactive matplotlib backend is available. In headless sessions it saves representative grids under `output_dir/cluster_representatives/` instead. You manually identify what each cluster contains: "cluster 7 = edge-on disks", "cluster 12 = spirals", "cluster 3 = compact ellipticals", etc. This is how unsupervised morphological taxonomy emerges.
 
 ---
 
