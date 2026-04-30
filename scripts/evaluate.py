@@ -31,6 +31,7 @@ Usage:
 """
 
 import argparse
+import json
 import logging
 import sys
 from pathlib import Path
@@ -280,7 +281,7 @@ def run_classification(args):
     """Train linear probe or fine-tuner on labeled data."""
     import torch
     from src.evaluation.classifier import (
-        LinearProbe, FineTuner, train_classifier, create_train_val_loaders,
+        LinearProbe, FineTuner, create_train_val_test_loaders, train_classifier,
     )
     from src.models.vit_config import get_vit_config
 
@@ -299,6 +300,14 @@ def run_classification(args):
         output_dir=Path(args.output_dir),
         kind="checkpoint",
     )
+
+    split_artifact_path = None
+    if args.split_artifact:
+        split_artifact_path = resolve_artifact_path(
+            args.split_artifact,
+            output_dir=Path(args.output_dir),
+            kind="split artifact",
+        )
 
     # Build encoder
     vit_config = get_vit_config(size=args.vit_size, image_size=64, patch_size=8, in_channels=1)
@@ -327,26 +336,50 @@ def run_classification(args):
     encoder = ssl_model.get_encoder()
 
     # Create data loaders
-    train_loader, val_loader, label_to_idx, class_weights = create_train_val_loaders(
-        str(labels_csv_path), batch_size=args.classify_batch_size, seed=args.seed,
+    train_loader, val_loader, test_loader, label_to_idx, class_weights, split_metadata = create_train_val_test_loaders(
+        str(labels_csv_path),
+        val_fraction=args.classify_val_fraction,
+        test_fraction=args.classify_test_fraction,
+        batch_size=args.classify_batch_size,
+        seed=args.seed,
+        balanced_sampling=args.classify_balanced_sampling,
+        split_artifact=str(split_artifact_path) if split_artifact_path is not None else None,
     )
     n_classes = len(label_to_idx)
 
     output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "classification_split_summary.json").write_text(
+        json.dumps(split_metadata, indent=2)
+    )
+    logger.info("Classification split summary: %s", json.dumps(split_metadata, sort_keys=True))
+
+    report_loader = test_loader if test_loader is not None else val_loader
+    report_split_name = "test" if test_loader is not None else "val"
 
     # Linear probe
     if args.linear_probe or not args.fine_tune:
         logger.info("=== LINEAR PROBE ===")
         probe = LinearProbe(encoder, vit_config.embed_dim, n_classes)
         probe_results = train_classifier(
-            probe, train_loader, val_loader,
+            probe,
+            train_loader,
+            val_loader,
+            report_loader=report_loader,
             epochs=args.classify_epochs,
             lr=args.classify_lr,
             device=args.device,
             output_dir=str(output_dir / "linear_probe"),
             class_weights=class_weights,
+            selection_metric=args.classify_selection_metric,
+            report_split_name=report_split_name,
         )
-        logger.info(f"Linear probe best val acc: {probe_results['best_val_acc']:.4f}")
+        logger.info(
+            "Linear probe best checkpoint: epoch=%s, %s=%.4f",
+            probe_results["best_epoch"],
+            probe_results["best_selection_metric"],
+            probe_results["best_selection_score"],
+        )
 
     # Fine-tuning
     if args.fine_tune:
@@ -355,15 +388,25 @@ def run_classification(args):
         encoder_ft = ssl_model.get_encoder()
         tuner = FineTuner(encoder_ft, vit_config.embed_dim, n_classes)
         ft_results = train_classifier(
-            tuner, train_loader, val_loader,
+            tuner,
+            train_loader,
+            val_loader,
+            report_loader=report_loader,
             epochs=args.classify_epochs,
             lr=args.classify_lr,
             backbone_lr=args.classify_lr * 0.1,
             device=args.device,
             output_dir=str(output_dir / "fine_tune"),
             class_weights=class_weights,
+            selection_metric=args.classify_selection_metric,
+            report_split_name=report_split_name,
         )
-        logger.info(f"Fine-tune best val acc: {ft_results['best_val_acc']:.4f}")
+        logger.info(
+            "Fine-tune best checkpoint: epoch=%s, %s=%.4f",
+            ft_results["best_epoch"],
+            ft_results["best_selection_metric"],
+            ft_results["best_selection_score"],
+        )
 
 
 def main():
@@ -425,6 +468,35 @@ def main():
     parser.add_argument("--classify_epochs", type=int, default=50)
     parser.add_argument("--classify_lr", type=float, default=1e-3)
     parser.add_argument("--classify_batch_size", type=int, default=64)
+    parser.add_argument(
+        "--classify_val_fraction",
+        type=float,
+        default=0.2,
+        help="Validation fraction when no frozen split artifact is provided.",
+    )
+    parser.add_argument(
+        "--classify_test_fraction",
+        type=float,
+        default=0.0,
+        help="Test fraction when no frozen split artifact is provided.",
+    )
+    parser.add_argument(
+        "--classify_selection_metric",
+        type=str,
+        choices=["accuracy", "macro_f1", "macro_recall", "min_class_f1", "spiral_f1", "spiral_recall"],
+        default="macro_f1",
+        help="Metric used to choose the best classifier checkpoint.",
+    )
+    parser.add_argument(
+        "--classify_balanced_sampling",
+        action="store_true",
+        help="Use weighted random sampling on the training split for imbalanced labels.",
+    )
+    parser.add_argument(
+        "--split_artifact",
+        type=str,
+        help="Path to a frozen split artifact directory or split_manifest.json file.",
+    )
 
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()

@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 import src.evaluation.classifier as classifier
-from src.evaluation.classifier import create_train_val_loaders, train_classifier
+from src.evaluation.classifier import create_train_val_loaders, create_train_val_test_loaders, train_classifier
 
 
 def write_sample_fits(path: Path) -> None:
@@ -49,6 +49,60 @@ class CreateTrainValLoadersTests(unittest.TestCase):
             self.assertGreaterEqual(len(train_loader.dataset), 1)
             self.assertGreaterEqual(len(val_loader.dataset), 1)
             self.assertEqual(class_weights.shape[0], 2)
+
+    def test_create_train_val_test_loaders_uses_frozen_split_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            csv_path = tmp_path / "labels.csv"
+            split_dir = tmp_path / "split"
+            split_dir.mkdir()
+
+            samples = [
+                (tmp_path / "a.fits", "c0", "not_spiral"),
+                (tmp_path / "b.fits", "c1", "spiral"),
+                (tmp_path / "c.fits", "c2", "not_spiral"),
+                (tmp_path / "d.fits", "c3", "spiral"),
+                (tmp_path / "e.fits", "c4", "not_spiral"),
+                (tmp_path / "f.fits", "c5", "spiral"),
+            ]
+            for fits_path, _, _ in samples:
+                write_sample_fits(fits_path)
+
+            with csv_path.open("w", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["file_path", "cluster_id", "label"])
+                for fits_path, cluster_id, label in samples:
+                    writer.writerow([str(fits_path), cluster_id, label])
+
+            def write_split_csv(path: Path, rows: list[tuple[Path, str, str]]) -> None:
+                with path.open("w", newline="") as handle:
+                    writer = csv.writer(handle)
+                    writer.writerow(["file_path", "cluster_id", "label"])
+                    for fits_path, cluster_id, label in rows:
+                        writer.writerow([str(fits_path), cluster_id, label])
+
+            write_split_csv(split_dir / "train.csv", [samples[0], samples[1]])
+            write_split_csv(split_dir / "val.csv", [samples[2], samples[3]])
+            write_split_csv(split_dir / "test.csv", [samples[4], samples[5]])
+            (split_dir / "split_manifest.json").write_text("{}")
+
+            train_loader, val_loader, test_loader, label_to_idx, class_weights, split_metadata = create_train_val_test_loaders(
+                str(csv_path),
+                batch_size=1,
+                num_workers=0,
+                split_artifact=str(split_dir),
+                seed=42,
+            )
+
+            self.assertEqual(len(label_to_idx), 2)
+            self.assertEqual(len(train_loader.dataset), 2)
+            self.assertEqual(len(val_loader.dataset), 2)
+            self.assertEqual(len(test_loader.dataset), 2)
+            self.assertEqual(class_weights.shape[0], 2)
+            self.assertEqual(split_metadata["split_source"], "artifact")
+            self.assertEqual(split_metadata["train_count"], 2)
+            self.assertEqual(split_metadata["val_count"], 2)
+            self.assertEqual(split_metadata["test_count"], 2)
 
     def test_ignores_literal_header_label_row(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
