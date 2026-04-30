@@ -102,6 +102,64 @@ def resolve_embeddings_path(requested_path: str, root_dir: Path | None = None) -
     raise FileNotFoundError(f"Embeddings file not found: {path}{hint}")
 
 
+def resolve_artifact_path(
+    requested_path: str,
+    *,
+    output_dir: Path | None = None,
+    root_dir: Path | None = None,
+    kind: str = "artifact",
+) -> Path:
+    """Resolve a checkpoint/CSV path from common local and experiment-relative locations."""
+    root_dir = root_dir or project_root
+    path = Path(requested_path)
+
+    if path.exists():
+        return path
+
+    candidates: list[Path] = []
+    if not path.is_absolute():
+        candidates.append(root_dir / path)
+
+    if output_dir is not None:
+        output_dir = Path(output_dir)
+        candidates.extend([
+            output_dir / path,
+            output_dir.parent / path,
+            output_dir.parent / "checkpoints" / path.name,
+        ])
+
+        if output_dir.parent.name != "checkpoints":
+            checkpoint_root = output_dir.parent / "checkpoints"
+            if checkpoint_root.exists():
+                for match in sorted(checkpoint_root.rglob(path.name)):
+                    if match.is_file():
+                        logger.info("Resolved %s path %s -> %s", kind, requested_path, match)
+                        return match
+
+    # Common experiment-local layout: output/experiments/<run>/checkpoints/<file>
+    candidates.extend([
+        root_dir / "output" / "checkpoints" / path.name,
+        root_dir / "output" / "experiments" / "checkpoints" / path.name,
+    ])
+
+    experiments_dir = root_dir / "output" / "experiments"
+    if experiments_dir.exists():
+        for match in sorted(experiments_dir.rglob(path.name)):
+            if match.is_file() and "checkpoints" in match.parts:
+                logger.info("Resolved %s path %s -> %s", kind, requested_path, match)
+                return match
+
+    for candidate in candidates:
+        if candidate.exists():
+            logger.info("Resolved %s path %s -> %s", kind, requested_path, candidate)
+            return candidate
+
+    searched = "\n".join(f"  - {candidate}" for candidate in candidates)
+    raise FileNotFoundError(
+        f"Could not resolve {kind} path: {requested_path}\nSearched:\n{searched}"
+    )
+
+
 def run_clustering_pipeline(args):
     """Run k-means clustering, UMAP, and visualization."""
     from src.evaluation.clustering import (
@@ -230,6 +288,18 @@ def run_classification(args):
         logger.error("--labels_csv required for classification")
         return
 
+    labels_csv_path = resolve_artifact_path(
+        args.labels_csv,
+        output_dir=Path(args.output_dir),
+        kind="labels CSV",
+    )
+
+    checkpoint_path = resolve_artifact_path(
+        args.checkpoint,
+        output_dir=Path(args.output_dir),
+        kind="checkpoint",
+    )
+
     # Build encoder
     vit_config = get_vit_config(size=args.vit_size, image_size=64, patch_size=8, in_channels=1)
 
@@ -248,7 +318,7 @@ def run_classification(args):
 
     # Load SSL checkpoint
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    state = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    state = torch.load(checkpoint_path, map_location=device, weights_only=False)
     if "model_state_dict" in state:
         ssl_model.load_state_dict(state["model_state_dict"], strict=False)
     else:
@@ -257,8 +327,8 @@ def run_classification(args):
     encoder = ssl_model.get_encoder()
 
     # Create data loaders
-    train_loader, val_loader, label_to_idx = create_train_val_loaders(
-        args.labels_csv, batch_size=args.classify_batch_size, seed=args.seed,
+    train_loader, val_loader, label_to_idx, class_weights = create_train_val_loaders(
+        str(labels_csv_path), batch_size=args.classify_batch_size, seed=args.seed,
     )
     n_classes = len(label_to_idx)
 
@@ -274,6 +344,7 @@ def run_classification(args):
             lr=args.classify_lr,
             device=args.device,
             output_dir=str(output_dir / "linear_probe"),
+            class_weights=class_weights,
         )
         logger.info(f"Linear probe best val acc: {probe_results['best_val_acc']:.4f}")
 
@@ -290,6 +361,7 @@ def run_classification(args):
             backbone_lr=args.classify_lr * 0.1,
             device=args.device,
             output_dir=str(output_dir / "fine_tune"),
+            class_weights=class_weights,
         )
         logger.info(f"Fine-tune best val acc: {ft_results['best_val_acc']:.4f}")
 

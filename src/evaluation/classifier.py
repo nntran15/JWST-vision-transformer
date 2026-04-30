@@ -47,8 +47,10 @@ class LabeledFITSDataset(Dataset):
         with open(csv_path) as f:
             reader = csv.DictReader(f)
             for row in reader:
-                if row["label"] not in ("unlabeled", "uncertain", "artifact"):
-                    self.samples.append((row["file_path"], row["label"]))
+                label = row["label"].strip()
+                if label in ("", "label", "unlabeled", "uncertain", "artifact"):
+                    continue
+                self.samples.append((row["file_path"], label))
 
         # Build label mapping
         if label_to_idx is not None:
@@ -138,6 +140,7 @@ def train_classifier(
     weight_decay: float = 0.01,
     device: str = "cuda",
     output_dir: str = "output/classifier",
+    class_weights: Optional[torch.Tensor] = None,
 ) -> dict:
     """
     Train a classification model (linear probe or fine-tuner).
@@ -152,6 +155,7 @@ def train_classifier(
         weight_decay: Weight decay.
         device: Device to train on.
         output_dir: Directory to save checkpoints and metrics.
+        class_weights: Optional class weights for imbalanced classification.
 
     Returns:
         Dict with training history and best metrics.
@@ -169,7 +173,10 @@ def train_classifier(
         param_groups = [{"params": model.parameters(), "lr": lr}]
 
     optimizer = torch.optim.AdamW(param_groups, weight_decay=weight_decay)
-    criterion = nn.CrossEntropyLoss()
+    if class_weights is not None:
+        class_weights = class_weights.to(device)
+        logger.info(f"Using class weights: {class_weights.tolist()}")
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
     Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -239,11 +246,19 @@ def train_classifier(
                             for i in range(model.head.out_features)]
         else:
             target_names = [str(i) for i in range(model.head.out_features)]
+        report_labels = list(range(len(target_names)))
     else:
         target_names = None
+        report_labels = None
 
-    report = classification_report(final_targets, final_preds, target_names=target_names)
-    cm = confusion_matrix(final_targets, final_preds)
+    report = classification_report(
+        final_targets,
+        final_preds,
+        labels=report_labels,
+        target_names=target_names,
+        zero_division=0,
+    )
+    cm = confusion_matrix(final_targets, final_preds, labels=report_labels)
 
     logger.info(f"\nClassification Report:\n{report}")
     logger.info(f"\nConfusion Matrix:\n{cm}")
@@ -301,14 +316,45 @@ def create_train_val_loaders(
     seed: int = 42,
 ) -> tuple:
     """Create train/val DataLoaders from a labeled CSV."""
-    full_dataset = LabeledFITSDataset(csv_path)
-    n_val = int(len(full_dataset) * val_fraction)
-    n_train = len(full_dataset) - n_val
+    from sklearn.model_selection import train_test_split
 
-    generator = torch.Generator().manual_seed(seed)
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        full_dataset, [n_train, n_val], generator=generator
+    full_dataset = LabeledFITSDataset(csv_path)
+    label_ids = np.array(
+        [full_dataset.label_to_idx[label] for _, label in full_dataset.samples],
+        dtype=np.int64,
     )
+    indices = np.arange(len(full_dataset))
+    n_classes = len(full_dataset.label_to_idx)
+    min_class_count = int(np.bincount(label_ids, minlength=n_classes).min())
+    n_val = int(round(len(full_dataset) * val_fraction))
+
+    if min_class_count >= 2 and n_val >= n_classes:
+        train_indices, val_indices = train_test_split(
+            indices,
+            test_size=val_fraction,
+            random_state=seed,
+            stratify=label_ids,
+        )
+    else:
+        logger.warning(
+            "Falling back to an unstratified split because the dataset is too small for stable stratification."
+        )
+        generator = torch.Generator().manual_seed(seed)
+        permutation = torch.randperm(len(full_dataset), generator=generator).cpu().numpy()
+        val_indices = permutation[:n_val]
+        train_indices = permutation[n_val:]
+
+    train_dataset = torch.utils.data.Subset(full_dataset, train_indices.tolist())
+    val_dataset = torch.utils.data.Subset(full_dataset, val_indices.tolist())
+
+    train_counts = np.bincount(label_ids[train_indices], minlength=n_classes)
+    val_counts = np.bincount(label_ids[val_indices], minlength=n_classes)
+    logger.info(f"Train split class counts: {train_counts.tolist()}")
+    logger.info(f"Val split class counts: {val_counts.tolist()}")
+
+    class_weights = train_counts.sum() / np.maximum(train_counts, 1)
+    class_weights = class_weights / class_weights.mean()
+    class_weights = torch.tensor(class_weights, dtype=torch.float32)
 
     train_loader = DataLoader(
         train_dataset, batch_size=batch_size, shuffle=True,
@@ -319,4 +365,4 @@ def create_train_val_loaders(
         num_workers=num_workers, pin_memory=True,
     )
 
-    return train_loader, val_loader, full_dataset.label_to_idx
+    return train_loader, val_loader, full_dataset.label_to_idx, class_weights
