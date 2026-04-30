@@ -18,6 +18,117 @@ from typing import Optional, Dict, Any
 logger = logging.getLogger(__name__)
 
 
+def _resolve_model_state_dict(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the PyTorch model state dict from a checkpoint payload."""
+    if not isinstance(state, dict):
+        raise TypeError("Checkpoint state must be a dictionary.")
+
+    model_state = state.get("model_state_dict")
+    if isinstance(model_state, dict):
+        return model_state
+
+    return state
+
+
+def load_downstream_encoder_weights(
+    model,
+    checkpoint_state: Dict[str, Any],
+    *,
+    min_match_ratio: float = 0.9,
+    log: Optional[logging.Logger] = None,
+) -> Dict[str, Any]:
+    """Load encoder weights for downstream inference from a saved SSL checkpoint."""
+    if not hasattr(model, "get_encoder"):
+        raise AttributeError("Model must define get_encoder() to load downstream weights.")
+
+    encoder = model.get_encoder()
+    target_state = encoder.state_dict()
+    raw_state = _resolve_model_state_dict(checkpoint_state)
+
+    prefixes = (
+        "",
+        "encoder.",
+        "student_backbone.",
+        "module.",
+        "module.encoder.",
+        "module.student_backbone.",
+    )
+    best_prefix = None
+    best_candidate = None
+    best_shape_mismatches = None
+
+    for prefix in prefixes:
+        candidate_state = {}
+        shape_mismatches = []
+
+        for raw_key, value in raw_state.items():
+            if prefix:
+                if not raw_key.startswith(prefix):
+                    continue
+                target_key = raw_key[len(prefix):]
+            else:
+                target_key = raw_key
+
+            if target_key not in target_state:
+                continue
+
+            if getattr(value, "shape", None) != target_state[target_key].shape:
+                shape_mismatches.append(target_key)
+                continue
+
+            candidate_state[target_key] = value
+
+        if best_candidate is None or len(candidate_state) > len(best_candidate):
+            best_prefix = prefix
+            best_candidate = candidate_state
+            best_shape_mismatches = shape_mismatches
+
+    assert best_candidate is not None
+    matched_keys = len(best_candidate)
+    total_keys = len(target_state)
+    prefix_label = best_prefix or "<direct>"
+
+    if matched_keys == 0:
+        sample_keys = list(raw_state.keys())[:5]
+        raise ValueError(
+            "Checkpoint did not contain encoder weights matching the downstream backbone. "
+            f"Tried prefixes {prefixes}. Sample checkpoint keys: {sample_keys}"
+        )
+
+    match_ratio = matched_keys / max(total_keys, 1)
+    missing_keys = sorted(set(target_state) - set(best_candidate))
+    if match_ratio < min_match_ratio:
+        raise ValueError(
+            "Checkpoint matched too few encoder tensors for downstream use "
+            f"({matched_keys}/{total_keys}, prefix={prefix_label}). "
+            f"Example missing keys: {missing_keys[:5]}"
+        )
+
+    encoder.load_state_dict(best_candidate, strict=False)
+
+    if log is not None:
+        log.info(
+            "Loaded downstream encoder weights using prefix %s (%s/%s tensors matched).",
+            prefix_label,
+            matched_keys,
+            total_keys,
+        )
+        if best_shape_mismatches:
+            log.warning(
+                "Skipped %s encoder tensors with shape mismatches; examples: %s",
+                len(best_shape_mismatches),
+                best_shape_mismatches[:5],
+            )
+
+    return {
+        "prefix": prefix_label,
+        "matched_keys": matched_keys,
+        "total_keys": total_keys,
+        "missing_keys": missing_keys,
+        "shape_mismatches": best_shape_mismatches or [],
+    }
+
+
 class CheckpointManager:
     """
     Unified checkpoint manager for training state.

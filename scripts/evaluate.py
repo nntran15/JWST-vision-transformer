@@ -35,6 +35,7 @@ import json
 import logging
 import sys
 from pathlib import Path
+from src.utils.checkpointing import load_downstream_encoder_weights
 
 import numpy as np
 
@@ -328,10 +329,7 @@ def run_classification(args):
     # Load SSL checkpoint
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     state = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    if "model_state_dict" in state:
-        ssl_model.load_state_dict(state["model_state_dict"], strict=False)
-    else:
-        ssl_model.load_state_dict(state, strict=False)
+    load_downstream_encoder_weights(ssl_model, state, log=logger)
 
     encoder = ssl_model.get_encoder()
 

@@ -34,6 +34,7 @@ import argparse
 import logging
 import sys
 from pathlib import Path
+from src.utils.checkpointing import load_downstream_encoder_weights
 
 import numpy as np
 import h5py
@@ -89,10 +90,7 @@ def extract_pytorch(
 
     # Load checkpoint
     state = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    if "model_state_dict" in state:
-        model.load_state_dict(state["model_state_dict"], strict=False)
-    else:
-        model.load_state_dict(state, strict=False)
+    load_downstream_encoder_weights(model, state, log=logger)
 
     # Get encoder
     encoder = model.get_encoder()
