@@ -7,6 +7,7 @@ import numpy as np
 from astropy.io import fits
 import torch
 import torch.nn as nn
+from torch.utils.data import WeightedRandomSampler
 
 import src.evaluation.classifier as classifier
 from src.evaluation.classifier import create_train_val_loaders, create_train_val_test_loaders, train_classifier
@@ -103,6 +104,43 @@ class CreateTrainValLoadersTests(unittest.TestCase):
             self.assertEqual(split_metadata["train_count"], 2)
             self.assertEqual(split_metadata["val_count"], 2)
             self.assertEqual(split_metadata["test_count"], 2)
+
+    def test_balanced_sampling_disables_loss_class_weights(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            csv_path = tmp_path / "labels.csv"
+
+            samples = [
+                (tmp_path / "n0.fits", "c0", "not_spiral"),
+                (tmp_path / "n1.fits", "c1", "not_spiral"),
+                (tmp_path / "n2.fits", "c2", "not_spiral"),
+                (tmp_path / "n3.fits", "c3", "not_spiral"),
+                (tmp_path / "s0.fits", "c4", "spiral"),
+                (tmp_path / "s1.fits", "c5", "spiral"),
+            ]
+            for fits_path, _, _ in samples:
+                write_sample_fits(fits_path)
+
+            with csv_path.open("w", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["file_path", "cluster_id", "label"])
+                for fits_path, cluster_id, label in samples:
+                    writer.writerow([str(fits_path), cluster_id, label])
+
+            train_loader, val_loader, test_loader, label_to_idx, class_weights, split_metadata = create_train_val_test_loaders(
+                str(csv_path),
+                batch_size=2,
+                num_workers=0,
+                seed=42,
+                balanced_sampling=True,
+            )
+
+            self.assertEqual(len(label_to_idx), 2)
+            self.assertIsNone(class_weights)
+            self.assertIsInstance(train_loader.sampler, WeightedRandomSampler)
+            self.assertGreater(len(val_loader.dataset), 0)
+            self.assertGreater(len(test_loader.dataset), 0)
+            self.assertIn("train_class_counts", split_metadata)
 
     def test_ignores_literal_header_label_row(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

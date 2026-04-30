@@ -735,19 +735,23 @@ def create_train_val_test_loaders(
     if test_indices.size:
         logger.info(f"Test split class counts: {test_counts.tolist()}")
 
-    class_weights = train_counts.sum() / np.maximum(train_counts, 1)
-    class_weights = class_weights / class_weights.mean()
-    class_weights = torch.tensor(class_weights, dtype=torch.float32)
+    rebalancing_weights = train_counts.sum() / np.maximum(train_counts, 1)
+    rebalancing_weights = rebalancing_weights / rebalancing_weights.mean()
+    rebalancing_weights = torch.tensor(rebalancing_weights, dtype=torch.float32)
 
     sampler = None
+    class_weights: Optional[torch.Tensor] = rebalancing_weights
     if balanced_sampling:
-        sample_weights = class_weights[label_ids[train_indices]].double()
+        sample_weights = rebalancing_weights[label_ids[train_indices]].double()
         sampler = WeightedRandomSampler(
             weights=sample_weights,
             num_samples=len(train_indices),
             replacement=True,
         )
-        logger.info("Using weighted random sampling for the training split.")
+        class_weights = None
+        logger.info(
+            "Using weighted random sampling for the training split; skipping loss class weights."
+        )
 
     train_loader = DataLoader(
         train_dataset,
