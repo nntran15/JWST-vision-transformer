@@ -383,7 +383,14 @@ class LinearProbe(nn.Module):
         self.encoder = encoder
         for param in self.encoder.parameters():
             param.requires_grad = False
+        self.encoder.eval()
         self.head = nn.Linear(embed_dim, n_classes)
+
+    def train(self, mode: bool = True):
+        """Keep the frozen encoder deterministic while training the head."""
+        super().train(mode)
+        self.encoder.eval()
+        return self
 
     def forward(self, x):
         with torch.no_grad():

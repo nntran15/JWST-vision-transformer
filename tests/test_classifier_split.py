@@ -10,7 +10,7 @@ import torch.nn as nn
 from torch.utils.data import WeightedRandomSampler
 
 import src.evaluation.classifier as classifier
-from src.evaluation.classifier import create_train_val_loaders, create_train_val_test_loaders, train_classifier
+from src.evaluation.classifier import LinearProbe, create_train_val_loaders, create_train_val_test_loaders, train_classifier
 
 
 def write_sample_fits(path: Path) -> None:
@@ -208,6 +208,21 @@ class CreateTrainValLoadersTests(unittest.TestCase):
 
             self.assertIn("classification_report", result)
             self.assertTrue((output_dir / "classification_report.txt").exists())
+
+    def test_linear_probe_keeps_encoder_in_eval_mode(self):
+        class DummyEncoder(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.dropout = nn.Dropout(p=0.5)
+
+            def get_cls_token(self, x):
+                return self.dropout(x)
+
+        probe = LinearProbe(DummyEncoder(), embed_dim=4, n_classes=2)
+        probe.train()
+
+        self.assertFalse(probe.encoder.training)
+        self.assertTrue(probe.head.training)
 
 
 if __name__ == "__main__":
