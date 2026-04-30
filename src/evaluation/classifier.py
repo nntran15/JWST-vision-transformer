@@ -22,6 +22,7 @@ from tqdm import tqdm
 from src.data.fits_preprocessing import collapse_to_single_channel, normalize_fits_data, resize_chw
 
 logger = logging.getLogger(__name__)
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _unwrap_dataset(dataset: Dataset) -> Dataset:
@@ -112,6 +113,65 @@ def _resolve_split_artifact_paths(split_artifact: str | Path) -> tuple[Path, Pat
         artifact_dir = split_path.parent
         manifest_path = split_path
     return artifact_dir, manifest_path
+
+
+def _discover_catalog_dirs(csv_path: str | Path) -> list[Path]:
+    """Discover likely FITS catalog roots for cross-environment label artifacts."""
+    csv_file = Path(csv_path).expanduser()
+    candidate_dirs: list[Path] = []
+
+    def add_candidate(path: Path) -> None:
+        if path.exists() and path not in candidate_dirs:
+            candidate_dirs.append(path)
+
+    default_dirs = [
+        PROJECT_ROOT / "data" / "JWST" / "resized_10k_files",
+        PROJECT_ROOT / "data" / "JWST" / "original_10k_files",
+    ]
+    for candidate_dir in default_dirs:
+        add_candidate(candidate_dir)
+
+    for ancestor in [csv_file.parent, *csv_file.parents]:
+        add_candidate(ancestor / "resized_10k_files")
+        add_candidate(ancestor / "original_10k_files")
+        add_candidate(ancestor / "data" / "JWST" / "resized_10k_files")
+        add_candidate(ancestor / "data" / "JWST" / "original_10k_files")
+
+    return candidate_dirs
+
+
+def _resolve_labeled_sample_paths(
+    raw_paths: list[str],
+    *,
+    csv_path: str | Path,
+) -> tuple[list[str], int, int]:
+    """Resolve stored FITS paths against current workspace catalog locations."""
+    candidate_dirs = _discover_catalog_dirs(csv_path)
+    resolved_paths: list[str] = []
+    remapped = 0
+    unresolved = 0
+
+    for raw_path in raw_paths:
+        path = Path(raw_path).expanduser()
+        if path.exists():
+            resolved_paths.append(str(path))
+            continue
+
+        replacement = None
+        for candidate_dir in candidate_dirs:
+            candidate_path = candidate_dir / path.name
+            if candidate_path.exists():
+                replacement = candidate_path
+                break
+
+        if replacement is not None:
+            resolved_paths.append(str(replacement))
+            remapped += 1
+        else:
+            resolved_paths.append(str(path))
+            unresolved += 1
+
+    return resolved_paths, remapped, unresolved
 
 
 def _load_frozen_split_indices(
@@ -313,6 +373,7 @@ class LabeledFITSDataset(Dataset):
         self.samples = []
         self.sample_rows = []
         self.sample_keys = []
+        self.resolved_paths = []
         self.label_names = []
         self.default_channels = 1
 
@@ -330,6 +391,12 @@ class LabeledFITSDataset(Dataset):
                 )
                 self.sample_keys.append(_make_sample_key(file_path, cluster_id, label))
 
+        raw_paths = [row["file_path"] for row in self.sample_rows]
+        self.resolved_paths, remapped_paths, unresolved_paths = _resolve_labeled_sample_paths(
+            raw_paths,
+            csv_path=csv_path,
+        )
+
         # Build label mapping
         if label_to_idx is not None:
             self.label_to_idx = label_to_idx
@@ -344,12 +411,20 @@ class LabeledFITSDataset(Dataset):
         for label, idx in sorted(self.label_to_idx.items(), key=lambda x: x[1]):
             count = sum(1 for _, l in self.samples if l == label)
             logger.info(f"  [{idx}] {label}: {count} samples")
+        if remapped_paths:
+            logger.info("Remapped %s labeled FITS paths to the current workspace", remapped_paths)
+        if unresolved_paths:
+            logger.warning(
+                "%s labeled FITS paths could not be resolved in the current workspace; they will fall back to zero images.",
+                unresolved_paths,
+            )
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        path, label = self.samples[idx]
+        _, label = self.samples[idx]
+        path = self.resolved_paths[idx]
 
         try:
             from astropy.io import fits as fits_io

@@ -166,6 +166,34 @@ class CreateTrainValLoadersTests(unittest.TestCase):
             self.assertEqual(dataset.n_classes, 2)
             self.assertNotIn("label", dataset.label_to_idx)
 
+    def test_remaps_stale_absolute_paths_to_current_catalog(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            catalog_dir = tmp_path / "data" / "JWST" / "resized_10k_files"
+            split_dir = tmp_path / "data" / "JWST" / "splits" / "manual_spiral_v1"
+            csv_path = split_dir / "labels_snapshot.csv"
+
+            actual_fits = catalog_dir / "galaxy_a.fits"
+            actual_fits.parent.mkdir(parents=True, exist_ok=True)
+            fits.PrimaryHDU(np.arange(64, dtype=np.float32).reshape(8, 8)).writeto(actual_fits)
+
+            split_dir.mkdir(parents=True, exist_ok=True)
+            with csv_path.open("w", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["file_path", "cluster_id", "label"])
+                writer.writerow([
+                    "/stale/workstation/data/JWST/resized_10k_files/galaxy_a.fits",
+                    "manual",
+                    "spiral",
+                ])
+
+            dataset = classifier.LabeledFITSDataset(str(csv_path))
+            tensor, label_idx = dataset[0]
+
+            self.assertEqual(dataset.resolved_paths[0], str(actual_fits))
+            self.assertGreater(float(tensor.sum().item()), 0.0)
+            self.assertEqual(label_idx, dataset.label_to_idx["spiral"])
+
     def test_train_classifier_final_report_handles_missing_class(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
